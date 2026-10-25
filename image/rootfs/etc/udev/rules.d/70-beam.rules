@@ -1,0 +1,6 @@
+# Beam+ (tx011) and BeamPro (st001) motor boards -> /dev/beam-motor
+SUBSYSTEM=="tty", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="000b", SYMLINK+="beam-motor", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0001", SYMLINK+="beam-motor", GROUP="dialout", MODE="0660"
+# Beam+ head and nav cameras (UVC)
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0006", SYMLINK+="video-head"
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0007", SYMLINK+="video-nav"

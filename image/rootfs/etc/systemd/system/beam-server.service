@@ -1,0 +1,23 @@
+[Unit]
+Description=Beam+ motor server
+# Start early: the motor board power-cycles the robot ~300 s after Beam's old software last
+# refreshed its watchdog, and this server is what refreshes it now.
+After=beam-config.service
+Wants=beam-config.service
+
+[Service]
+User=beamsrv
+Group=beamsrv
+SupplementaryGroups=dialout
+EnvironmentFile=-/etc/beam/server.env
+WorkingDirectory=/opt/beam-revival
+ExecStart=/usr/bin/python3 -m beamctl.server --device /dev/beam-motor --port 8080 $BEAM_ARGS
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

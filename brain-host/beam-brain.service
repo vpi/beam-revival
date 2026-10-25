@@ -1,0 +1,21 @@
+# Beam+ brain (face recognition and greetings) on a Linux host such as a Proxmox VM.
+# Install: see brain-host/install.sh. Settings live in /etc/beam-brain.env:
+#   BEAM_BRAIN_URL=wss://beam-lab.<tailnet>.ts.net/ws    (the robot; ws://127.0.0.1:8080/ws for the dev setup)
+#   BEAM_BRAIN_KEY=<same as BRAIN_KEY in the robot's beam.conf>
+#   BEAM_BRAIN_ARGS=                                      (optional, e.g. --token <ACCESS_TOKEN>)
+[Unit]
+Description=Beam+ brain (face recognition, greetings)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=__USER__
+EnvironmentFile=/etc/beam-brain.env
+WorkingDirectory=__PROJECT__
+ExecStart=__PYTHON__ -m beambrain --url ${BEAM_BRAIN_URL} --key ${BEAM_BRAIN_KEY} \
+  --models __HOME__/beam-brain/models --data __HOME__/beam-brain/data $BEAM_BRAIN_ARGS
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

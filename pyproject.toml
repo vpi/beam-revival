@@ -1,0 +1,17 @@
+[project]
+name = "beamctl"
+version = "0.1.0"
+description = "Local, cloud-free control stack for the Beam+ telepresence robot"
+requires-python = ">=3.10"
+dependencies = ["aiohttp>=3.9"]
+
+[project.scripts]
+beam-server = "beamctl.server:main"
+beam-sim = "beamctl.sim:main"
+
+[tool.setuptools.package-data]
+beamctl = ["web/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

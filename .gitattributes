@@ -1,0 +1,6 @@
+# Unix line endings everywhere: these files run on Linux (the robot, the brain host), and a CRLF
+# shell script or systemd unit breaks there. PowerShell scripts keep Windows endings.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.jpg binary
+*.png binary

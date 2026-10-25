@@ -1,0 +1,15 @@
+{
+  "AudioCaptureAllowedUrls": ["http://localhost:8080"],
+  "VideoCaptureAllowedUrls": ["http://localhost:8080"],
+  "AutoplayAllowed": true,
+  "TranslateEnabled": false,
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "MetricsReportingEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "DefaultBrowserSettingEnabled": false,
+  "PromotionalTabsEnabled": false,
+  "SpellcheckEnabled": false
+}

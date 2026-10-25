@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Beam+ Drive</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --text: #1b1f24; --muted: #6a7380; --line: #dfe3e8;
+    --accent: #2f6fde; --ok: #1f9d55; --warn: #c98a00; --bad: #d63b3b; --knob: #2f6fde;
+    --stop-bg: #d63b3b; --stop-text: #ffffff; --video: #11151a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #181c22; --text: #e7eaee; --muted: #8b95a3; --line: #2a3038;
+      --accent: #5a92f0; --ok: #39c477; --warn: #e2a72e; --bad: #f05d5d; --knob: #5a92f0;
+      --stop-bg: #e04848; --video: #07090b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: grid; grid-template-rows: auto 1fr; overflow: hidden;
+    -webkit-user-select: none; user-select: none; touch-action: manipulation;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+    border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+          border: 1px solid var(--line); color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .spacer { flex: 1; }
+  main { display: grid; grid-template-columns: 1fr 300px; gap: 16px; padding: 16px; min-height: 0; }
+  .video {
+    position: relative; background: var(--video); border-radius: 12px; overflow: hidden; min-height: 0;
+    display: grid; place-items: center; color: #8b95a3;
+  }
+  .video .placeholder { text-align: center; padding: 16px; }
+  .video .placeholder strong { display: block; color: #c7cdd5; font-size: 15px; margin-bottom: 4px; }
+  .video video.main { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  .video video.inset { position: absolute; right: 12px; bottom: 12px; width: 26%; max-width: 240px; aspect-ratio: 4 / 3;
+                       object-fit: cover; border-radius: 8px; border: 2px solid rgba(255,255,255,.35); background: #000;
+                       cursor: pointer; z-index: 2; }
+  .video .hidden { display: none; }
+  .vbtns { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 8px; z-index: 2; }
+  .vbtn { border: 0; border-radius: 999px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer;
+          background: rgba(20, 24, 30, .78); color: #fff; backdrop-filter: blur(6px); }
+  .vbtn[disabled] { opacity: .45; cursor: not-allowed; }
+  .vbtn.live { background: var(--bad); }
+  .banner.info { background: var(--accent); color: #fff; }
+  /* Face boxes from the brain, drawn over the head camera. */
+  .faces { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .facebox { position: absolute; border: 2px solid var(--ok); border-radius: 6px; pointer-events: auto; }
+  .facebox.unknown { border-style: dashed; border-color: var(--warn); cursor: pointer; }
+  .facebox span { position: absolute; left: -2px; top: -24px; white-space: nowrap; font-size: 12px; font-weight: 600;
+                  padding: 2px 6px; border-radius: 4px; background: var(--ok); color: #fff; }
+  .facebox.unknown span { background: var(--warn); color: #111; }
+  .person { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+  .person img { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; background: var(--line); }
+  .person .who { flex: 1; min-width: 0; }
+  .person .who small { display: block; color: var(--muted); }
+  .linkbtn { border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: 6px;
+             padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+  .hiddenCard { display: none; }
+  /* The AI is in charge: its own colour everywhere, never mistaken for a person. */
+  :root { --ai: #7c4dff; }
+  .ai-banner { position: absolute; top: 0; left: 0; right: 0; z-index: 3; background: var(--ai); color: #fff;
+               padding: 8px 12px; font-weight: 700; display: none; }
+  .ai-banner small { display: block; font-weight: 500; opacity: .9; }
+  .ai-banner.on { display: block; }
+  .ai-banner button { float: right; border: 0; border-radius: 6px; padding: 4px 10px; font: inherit; font-weight: 700;
+                      background: #fff; color: var(--ai); cursor: pointer; }
+  #aiCard textarea, #aiCard select { width: 100%; box-sizing: border-box; font: inherit; color: var(--text);
+                      background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+  #aiCard textarea { resize: vertical; min-height: 54px; margin: 6px 0; }
+  .aibtn { border: 0; border-radius: 6px; padding: 6px 12px; font: inherit; font-weight: 700; cursor: pointer;
+           background: var(--ai); color: #fff; }
+  .ailog { font-size: 12px; color: var(--muted); max-height: 140px; overflow: auto; margin-top: 6px; }
+  .ailog div { padding: 2px 0; border-bottom: 1px dashed var(--line); }
+  .dot.ai { background: var(--ai); }
+  .banner {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    padding: 8px 14px; border-radius: 8px; font-weight: 600; display: none; white-space: nowrap;
+  }
+  .banner.show { display: block; }
+  .banner.bad { background: var(--bad); color: #fff; }
+  .banner.warn { background: var(--warn); color: #111; }
+  aside { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .card h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  .row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+  .row span:first-child { color: var(--muted); }
+  .num { font-variant-numeric: tabular-nums; }
+  .battery { height: 10px; border-radius: 6px; background: var(--line); overflow: hidden; margin: 6px 0 4px; }
+  .battery > div { height: 100%; width: 0; background: var(--ok); transition: width .3s; }
+  .estop {
+    width: 100%; padding: 16px; border: 0; border-radius: 12px; font-size: 18px; font-weight: 800;
+    letter-spacing: .04em; background: var(--stop-bg); color: var(--stop-text); cursor: pointer;
+  }
+  .estop.latched { background: transparent; color: var(--bad); outline: 3px solid var(--bad); outline-offset: -3px; }
+  .joy-wrap { display: grid; place-items: center; padding: 6px 0; }
+  .joy { position: relative; width: 180px; height: 180px; border-radius: 50%;
+         border: 2px solid var(--line); background: radial-gradient(circle, var(--bg) 0 30%, transparent 31%); touch-action: none; }
+  .joy .knob { position: absolute; width: 64px; height: 64px; left: 58px; top: 58px; border-radius: 50%;
+               background: var(--knob); opacity: .9; box-shadow: 0 4px 12px rgba(0,0,0,.25); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .help { color: var(--muted); font-size: 12px; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 40vh auto; overflow: visible; }
+    aside { overflow: visible; }
+    body { overflow: auto; }
+    header { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Beam+</h1>
+  <span class="pill"><span id="linkDot" class="dot"></span><span id="linkText">connecting…</span></span>
+  <span class="pill"><span id="ctlDot" class="dot"></span><span id="ctlText">idle</span></span>
+  <span class="spacer"></span>
+  <span class="pill num" id="batteryPill">battery —</span>
+</header>
+<main>
+  <section class="video">
+    <div class="placeholder" id="placeholder">
+      <strong id="phTitle">Connecting to the robot's camera…</strong>
+      <span id="phText">Driving works without video.</span>
+    </div>
+    <video id="vidA" class="main hidden" autoplay muted playsinline></video>
+    <video id="vidB" class="inset hidden" autoplay muted playsinline title="Click to swap cameras"></video>
+    <div id="faces" class="faces"></div>
+    <div id="aiBanner" class="ai-banner"><button id="aiTakeOver">Take over</button><span id="aiBannerText"></span><small id="aiBannerTask"></small></div>
+    <audio id="robotAudio" autoplay></audio>
+    <div class="vbtns">
+      <button id="soundBtn" class="vbtn hidden">🔇 Enable sound</button>
+      <button id="talkBtn" class="vbtn" disabled title="Microphone">🎤 Talk</button>
+    </div>
+    <div id="banner" class="banner"></div>
+  </section>
+  <aside>
+    <button id="estop" class="estop" title="Space">STOP</button>
+
+    <div class="card">
+      <h2>Drive</h2>
+      <div class="joy-wrap"><div class="joy" id="joy"><div class="knob" id="knob"></div></div></div>
+      <div class="row"><span>Speed limit</span><span class="num" id="speedLabel">50%</span></div>
+      <input id="speed" type="range" min="10" max="100" step="5" value="50">
+      <p class="help"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows to drive, <kbd>Space</kbd> to stop. A gamepad works too. Releasing every control stops the robot.</p>
+    </div>
+
+    <div class="card">
+      <h2>Robot</h2>
+      <div class="battery"><div id="battBar"></div></div>
+      <div class="row"><span>Battery</span><span class="num" id="batt">—</span></div>
+      <div class="row"><span>Charging</span><span id="charging">—</span></div>
+      <div class="row"><span>Speed</span><span class="num" id="vel">—</span></div>
+      <div class="row"><span>Turn rate</span><span class="num" id="turn">—</span></div>
+      <div class="row"><span>Heading</span><span class="num" id="yaw">—</span></div>
+      <div class="row"><span>Motors</span><span id="motors">—</span></div>
+    </div>
+
+    <div class="card hiddenCard" id="aiCard">
+      <h2>🤖 AI driver (experimental)</h2>
+      <select id="aiModel">
+        <option value="hf:deepseek-ai/DeepSeek-V4.1-Flash">DeepSeek V4.1 Flash</option>
+        <option value="hf:deepseek-ai/DeepSeek-V4.1-Flash-1017">DeepSeek V4.1 Flash 1017 (beta)</option>
+        <option value="hf:Qwen/Qwen3.8-27B">Qwen 3.8 27B</option>
+        <option value="hf:zai-org/GLM-5.3-Flash">GLM 5.3 Flash</option>
+      </select>
+      <textarea id="aiTask" placeholder="e.g. Find the red ball and stop in front of it"></textarea>
+      <button class="aibtn" id="aiStart">Start</button>
+      <button class="linkbtn" id="aiStop">Stop</button>
+      <p class="help">Any drive key, the joystick or STOP takes over from the AI immediately.</p>
+      <div class="ailog" id="aiLog"></div>
+    </div>
+
+    <div class="card hiddenCard" id="peopleCard">
+      <h2>People</h2>
+      <div class="row"><span>Face recognition</span><span id="frState">—</span></div>
+      <div id="peopleList"></div>
+      <p class="help" id="peopleHelp">Click a face with a dashed box in the video to teach the robot a name.</p>
+      <button class="linkbtn" id="pauseBtn">Pause recognition</button>
+    </div>
+
+    <div class="card">
+      <h2>Link</h2>
+      <div class="row"><span>Board replies</span><span class="num" id="replies">—</span></div>
+      <div class="row"><span>Timeouts / CRC errors</span><span class="num" id="errors">—</span></div>
+      <div class="row"><span>Board latency</span><span class="num" id="latency">—</span></div>
+      <div class="row"><span>Power watchdog</span><span class="num" id="watchdog">—</span></div>
+    </div>
+  </aside>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const token = new URLSearchParams(location.search).get("token");
+  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws${token ? "?token=" + encodeURIComponent(token) : ""}`;
+
+  let ws = null, connected = false, estop = false, last = null;
+  const input = { kb: [0, 0], joy: [0, 0], pad: [0, 0] };
+  const keys = new Set();
+  let sentZero = true;
+
+  // ---------- connection ----------
+  function connect() {
+    ws = new WebSocket(wsUrl);
+    ws.onopen = () => { connected = true; rtcHello(); };
+    ws.onclose = () => { connected = false; setLink(false); closeRtc("Server offline"); setTimeout(connect, 1000); };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "status") render(m);
+      else if (m.type === "denied") flash("Another driver has control", "warn");
+      else if (m.type === "rtc") onRtc(m.data);
+      else if (m.type === "robot_online") rtcHello();
+      else if (m.type === "rtc_unavailable") closeRtc("The robot's camera page isn't running");
+      else if (m.type === "brain") onBrainState(m);
+      else if (m.type === "faces") { lastFaces = m; drawFaces(); }
+      else if (m.type === "people") renderPeople(m.people || []);
+      else if (m.type === "notice") flash(m.text, "info", 4000);
+      else if (m.type === "ai") onAi(m);
+    };
+  }
+
+  // ---------- video & audio (WebRTC; the robot page sends the offer) ----------
+  let pc = null, streamIds = {}, swapped = false, mic = null, audioSender = null, retry = null;
+  const vidA = $("vidA"), vidB = $("vidB");
+
+  function rtcHello() { clearTimeout(retry); send({ type: "rtc", data: { kind: "hello" } }); }
+
+  async function onRtc(data) {
+    if (data.kind === "offer") {
+      closeRtc(null);
+      streamIds = data.streams || {};
+      pc = new RTCPeerConnection({ iceServers: [] });
+      pc.onicecandidate = (e) => e.candidate && send({ type: "rtc", data: { kind: "ice", candidate: e.candidate } });
+      pc.ontrack = (e) => attachTrack(e);
+      pc.onconnectionstatechange = () => {
+        if (pc && pc.connectionState === "failed") { closeRtc("Video connection lost, retrying…"); retry = setTimeout(rtcHello, 2000); }
+      };
+      await pc.setRemoteDescription(data.sdp);
+      // Keep our audio sender negotiated (sendrecv) so Talk can switch the mic on without renegotiating.
+      for (const t of pc.getTransceivers()) {
+        if (t.receiver.track.kind === "audio") { t.direction = "sendrecv"; audioSender = t.sender; }
+      }
+      if (mic) await audioSender.replaceTrack(mic.getAudioTracks()[0]);
+      await pc.setLocalDescription(await pc.createAnswer());
+      send({ type: "rtc", data: { kind: "answer", sdp: pc.localDescription } });
+    } else if (data.kind === "ice" && pc) {
+      try { await pc.addIceCandidate(data.candidate); } catch (e) { console.warn(e); }
+    }
+  }
+
+  function attachTrack(e) {
+    const stream = e.streams[0];
+    if (e.track.kind === "audio") {
+      const a = $("robotAudio");
+      a.srcObject = new MediaStream([e.track]);
+      a.play().catch(() => $("soundBtn").classList.remove("hidden"));
+      return;
+    }
+    const isNav = stream && stream.id === streamIds.nav;
+    const el = (isNav !== swapped) ? vidB : vidA;
+    el.srcObject = stream || new MediaStream([e.track]);
+    el.classList.remove("hidden");
+    $("placeholder").classList.add("hidden");
+  }
+
+  window.beamDebug = () => pc && { connection: pc.connectionState, ice: pc.iceConnectionState, streams: streamIds };
+
+  // ---------- brain: face boxes, naming, people list ----------
+  let lastFaces = null, brainOnline = false, brainPaused = false;
+  const facesLayer = $("faces");
+
+  // ---------- AI driver ----------
+  let aiActive = false;
+  function onAi(m) {
+    aiActive = !!m.active;
+    $("aiBanner").classList.toggle("on", aiActive);
+    $("aiBannerText").textContent = `🤖 AI is driving${m.action ? " · " + m.action : ""}`;
+    $("aiBannerTask").textContent = `${m.model ? m.model.replace(/^hf:[^/]+\//, "") + " · " : ""}Task: ${m.task || ""}`;
+    const log = $("aiLog");
+    const line = document.createElement("div");
+    line.textContent = m.active
+      ? `${m.step ? "step " + m.step + ": " : ""}${m.action || ""}${m.why ? " — " + m.why : ""}`
+      : `finished: ${m.outcome}${m.summary ? " — " + m.summary : ""}`;
+    log.prepend(line);
+    while (log.children.length > 40) log.lastChild.remove();
+  }
+  $("aiStart").addEventListener("click", () => {
+    const task = $("aiTask").value.trim();
+    if (!task) { flash("Type a task for the AI first", "warn"); return; }
+    send({ type: "brain", data: { kind: "ai_task", task, model: $("aiModel").value } });
+  });
+  const stopAi = () => send({ type: "brain", data: { kind: "ai_stop" } });
+  $("aiStop").addEventListener("click", stopAi);
+  $("aiTakeOver").addEventListener("click", () => { stopAi(); send({ type: "stop" }); });
+
+  function onBrainState(m) {
+    brainOnline = !!m.online;
+    brainPaused = !!m.paused;
+    $("peopleCard").classList.toggle("hiddenCard", !brainOnline);
+    $("aiCard").classList.toggle("hiddenCard", !brainOnline);
+    $("frState").textContent = !brainOnline ? "off" : brainPaused ? "paused" : "on";
+    $("pauseBtn").textContent = brainPaused ? "Resume recognition" : "Pause recognition";
+    if (!brainOnline || brainPaused) { lastFaces = null; drawFaces(); }
+  }
+  $("pauseBtn").addEventListener("click", () => send({ type: "brain", data: { kind: "pause", on: !brainPaused } }));
+
+  // Boxes are in the brain's frame coordinates (the head camera); map them onto the displayed video.
+  function drawFaces() {
+    facesLayer.textContent = "";
+    if (!lastFaces || !lastFaces.faces || !lastFaces.faces.length || swapped) return;   // head cam must be the main view
+    const v = vidA;
+    if (!v.videoWidth || !lastFaces.w) return;
+    const box = v.getBoundingClientRect(), host = facesLayer.getBoundingClientRect();
+    const scale = Math.min(box.width / v.videoWidth, box.height / v.videoHeight);
+    const dispW = v.videoWidth * scale, dispH = v.videoHeight * scale;
+    const offX = box.left - host.left + (box.width - dispW) / 2, offY = box.top - host.top + (box.height - dispH) / 2;
+    const k = dispW / lastFaces.w;
+    for (const f of lastFaces.faces) {
+      const el = document.createElement("div");
+      el.className = "facebox" + (f.name ? "" : " unknown");
+      Object.assign(el.style, { left: offX + f.x * k + "px", top: offY + f.y * k + "px", width: f.w * k + "px", height: f.h * k + "px" });
+      const label = document.createElement("span");
+      label.textContent = f.name || "Who's this?";
+      el.appendChild(label);
+      if (!f.name) el.addEventListener("click", () => nameFace(f.id));
+      facesLayer.appendChild(el);
+    }
+  }
+  addEventListener("resize", drawFaces);
+
+  function nameFace(id) {
+    const name = (prompt("Who is this? The robot will greet them by this name.") || "").trim();
+    if (name) send({ type: "brain", data: { kind: "enroll", face_id: id, name } });
+  }
+
+  function renderPeople(people) {
+    const list = $("peopleList");
+    list.textContent = "";
+    for (const p of people) {
+      const row = document.createElement("div"); row.className = "person";
+      const img = document.createElement("img"); img.alt = "";
+      if (p.thumb) img.src = "data:image/jpeg;base64," + p.thumb;
+      const who = document.createElement("div"); who.className = "who";
+      who.textContent = p.name;
+      const small = document.createElement("small"); small.textContent = `${p.samples} face sample${p.samples === 1 ? "" : "s"}`;
+      who.appendChild(small);
+      const forget = document.createElement("button"); forget.className = "linkbtn"; forget.textContent = "Forget";
+      forget.addEventListener("click", () => {
+        if (confirm(`Forget ${p.name}? Their face data is deleted.`)) send({ type: "brain", data: { kind: "forget", name: p.name } });
+      });
+      row.append(img, who, forget);
+      list.appendChild(row);
+    }
+    $("peopleHelp").textContent = people.length
+      ? "Click a dashed box in the video to teach another name."
+      : "Nobody yet. Click a face with a dashed box in the video to teach the robot a name.";
+  }
+
+  vidB.addEventListener("click", () => {
+    swapped = !swapped;
+    [vidA.srcObject, vidB.srcObject] = [vidB.srcObject, vidA.srcObject];
+    drawFaces();
+  });
+  $("soundBtn").addEventListener("click", () => { $("robotAudio").play(); $("soundBtn").classList.add("hidden"); });
+
+  function closeRtc(reason) {
+    if (pc) { pc.close(); pc = null; }
+    audioSender = null;
+    for (const v of [vidA, vidB]) { v.srcObject = null; v.classList.add("hidden"); }
+    $("robotAudio").srcObject = null;
+    if (reason) {
+      $("placeholder").classList.remove("hidden");
+      $("phTitle").textContent = reason;
+      $("phText").textContent = "Driving still works without video.";
+    }
+  }
+
+  // Talk: the browser only allows the microphone on HTTPS (or localhost).
+  const talkBtn = $("talkBtn");
+  if (window.isSecureContext && navigator.mediaDevices) {
+    talkBtn.disabled = false;
+  } else {
+    talkBtn.title = "Your microphone needs HTTPS. Start the server with --tls-cert (see README).";
+  }
+  talkBtn.addEventListener("click", async () => {
+    if (mic) {
+      mic.getTracks().forEach((t) => t.stop()); mic = null;
+      if (audioSender) await audioSender.replaceTrack(null);
+      talkBtn.classList.remove("live"); talkBtn.textContent = "🎤 Talk";
+      return;
+    }
+    try {
+      mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    } catch (e) { flash("Microphone blocked: " + e.message, "warn"); return; }
+    if (audioSender) await audioSender.replaceTrack(mic.getAudioTracks()[0]);
+    talkBtn.classList.add("live"); talkBtn.textContent = "🎤 Mic on";
+    $("robotAudio").play().catch(() => {});
+  });
+  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  // ---------- inputs ----------
+  const scale = () => Number($("speed").value) / 100;
+  $("speed").addEventListener("input", () => { $("speedLabel").textContent = $("speed").value + "%"; });
+
+  const KEYMAP = { KeyW: [1, 0], ArrowUp: [1, 0], KeyS: [-1, 0], ArrowDown: [-1, 0],
+                   KeyA: [0, 1], ArrowLeft: [0, 1], KeyD: [0, -1], ArrowRight: [0, -1] };
+  addEventListener("keydown", (e) => {
+    if (e.code === "Space") { e.preventDefault(); setEstop(true); return; }
+    if (KEYMAP[e.code]) { e.preventDefault(); keys.add(e.code); updateKb(); }
+  });
+  addEventListener("keyup", (e) => { if (KEYMAP[e.code]) { keys.delete(e.code); updateKb(); } });
+  function updateKb() {
+    let lin = 0, ang = 0;
+    for (const k of keys) { lin += KEYMAP[k][0]; ang += KEYMAP[k][1]; }
+    input.kb = [Math.max(-1, Math.min(1, lin)), Math.max(-1, Math.min(1, ang))];
+  }
+  // Losing focus must never leave the robot driving.
+  function releaseAll() { keys.clear(); updateKb(); input.joy = [0, 0]; centerKnob(); }
+  addEventListener("blur", releaseAll);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
+
+  // On-screen joystick (mouse or touch)
+  const joy = $("joy"), knob = $("knob");
+  let joyId = null;
+  function centerKnob() { knob.style.transform = "translate(0px, 0px)"; }
+  joy.addEventListener("pointerdown", (e) => { joyId = e.pointerId; joy.setPointerCapture(joyId); moveJoy(e); });
+  joy.addEventListener("pointermove", (e) => { if (e.pointerId === joyId) moveJoy(e); });
+  const endJoy = (e) => { if (e.pointerId === joyId) { joyId = null; input.joy = [0, 0]; centerKnob(); } };
+  joy.addEventListener("pointerup", endJoy);
+  joy.addEventListener("pointercancel", endJoy);
+  function moveJoy(e) {
+    const r = joy.getBoundingClientRect(), R = r.width / 2 - 32;
+    let dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+    const d = Math.hypot(dx, dy);
+    if (d > R) { dx *= R / d; dy *= R / d; }
+    knob.style.transform = `translate(${dx}px, ${dy}px)`;
+    input.joy = [-dy / R, -dx / R];
+  }
+
+  function readGamepad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const gp of pads) {
+      if (!gp) continue;
+      const dz = (v) => (Math.abs(v) < 0.15 ? 0 : v);
+      input.pad = [-dz(gp.axes[1] || 0), -dz((gp.axes[2] ?? gp.axes[0]) || 0)];
+      if (gp.buttons[1] && gp.buttons[1].pressed) setEstop(true);   // B / circle
+      return;
+    }
+    input.pad = [0, 0];
+  }
+
+  // ---------- send loop (20 Hz) ----------
+  function tick() {
+    readGamepad();
+    const src = [input.joy, input.pad, input.kb].find(([l, a]) => l !== 0 || a !== 0) || [0, 0];
+    const maxLin = last ? last.drive.max_linear : 0.6, maxAng = last ? last.drive.max_angular : 1.0;
+    const lin = src[0] * maxLin * scale(), ang = src[1] * maxAng * Math.max(0.5, scale());
+    if (estop) return;
+    if (lin !== 0 || ang !== 0) { send({ type: "drive", linear: lin, angular: ang }); sentZero = false; }
+    else if (!sentZero) { send({ type: "stop" }); sentZero = true; }
+  }
+  setInterval(tick, 50);
+
+  // ---------- e-stop ----------
+  function setEstop(on) {
+    estop = on;
+    send({ type: on ? "estop" : "release_estop" });
+    releaseAll();
+  }
+  $("estop").addEventListener("click", () => setEstop(!estop));
+
+  // ---------- telemetry ----------
+  function setLink(ok, text) {
+    $("linkDot").className = "dot " + (ok ? "ok" : "bad");
+    $("linkText").textContent = text || (ok ? "robot online" : "robot offline");
+  }
+  let flashMsg = null, flashUntil = 0;
+  function flash(text, kind, ms = 2000) { flashMsg = [text, kind]; flashUntil = Date.now() + ms; showBanner(); }
+  function showBanner() {
+    const b = $("banner"), D = last && last.drive, L = last && last.link;
+    let msg = null;
+    if (D && D.estop) msg = ["E-STOP ENGAGED", "bad"];
+    else if (connected && L && !L.connected) msg = ["Motor board not responding", "warn"];
+    else if (Date.now() < flashUntil) msg = flashMsg;
+    if (msg) { b.textContent = msg[0]; b.className = "banner show " + msg[1]; }
+    else b.className = "banner";
+  }
+  function render(m) {
+    last = m;
+    const L = m.link, D = m.drive, B = m.board;
+    if (m.media && !m.media.robot_online && !pc) {
+      $("phTitle").textContent = "The robot's camera page isn't running";
+      $("phText").textContent = "Driving still works without video.";
+    }
+    if (!connected) setLink(false, "server offline");
+    else if (!L.connected) setLink(false, "motor board offline");
+    else setLink(true);
+
+    estop = D.estop;
+    const st = $("estop");
+    st.textContent = D.estop ? "STOPPED · tap to release" : "STOP";
+    st.classList.toggle("latched", D.estop);
+
+    const moving = Math.abs(D.commanded_linear) > 0.01 || Math.abs(D.commanded_angular) > 0.01;
+    $("ctlDot").className = "dot " + (D.estop ? "bad" : m.you_have_control ? "ok" : D.driver === "brain" ? "ai" : "");
+    $("ctlText").textContent = D.estop ? "e-stop" : m.you_have_control ? (moving ? "driving" : "in control")
+      : D.driver === "brain" ? "🤖 AI driving" : "idle";
+
+    showBanner();
+
+    $("replies").textContent = L.replies.toLocaleString();
+    $("errors").textContent = `${L.timeouts} / ${L.crc_errors}`;
+    $("watchdog").textContent = L.watchdog_age_s == null ? "—" : `refreshed ${L.watchdog_age_s.toFixed(1)} s ago`;
+    if (!B) return;
+    const pct = B.battery_percent;
+    $("battBar").style.width = (pct ?? 0) + "%";
+    $("battBar").style.background = pct != null && pct < 20 ? "var(--bad)" : "var(--ok)";
+    $("batt").textContent = `${pct == null ? "—" : pct.toFixed(0) + "%"} · ${B.battery_voltage.toFixed(1)} V`;
+    $("batteryPill").textContent = `battery ${pct == null ? "—" : pct.toFixed(0) + "%"}${B.charging ? " ⚡" : ""}`;
+    $("charging").textContent = B.charging ? "yes" : B.charger_detected ? "on dock" : "no";
+    $("vel").textContent = `${B.actual_linear.toFixed(2)} m/s`;
+    $("turn").textContent = `${(B.actual_angular * 57.2958).toFixed(0)} °/s`;
+    $("yaw").textContent = `${B.yaw_deg.toFixed(0)}°`;
+    $("motors").textContent = B.fault ? `fault ${B.fault}` : B.motors_enabled ? "enabled" : "disabled";
+    $("latency").textContent = `${B.command_latency_ms} / ${B.limiter_latency_ms} ms`;
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

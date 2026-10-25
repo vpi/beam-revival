@@ -1,0 +1,14 @@
+[Unit]
+Description=One-time read-only backup of the robot's internal disk
+After=beam-firstboot.service local-fs.target
+ConditionPathExists=!/var/lib/beam/backup-done
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/local/sbin/beam-setup backup
+ExecStartPost=/usr/bin/touch /var/lib/beam/backup-done
+
+[Install]
+WantedBy=multi-user.target

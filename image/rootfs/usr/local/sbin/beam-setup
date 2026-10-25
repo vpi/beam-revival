@@ -1,0 +1,343 @@
+#!/usr/bin/python3
+"""Robot-side setup tasks for the Beam+ USB image. Each runs from its own systemd unit.
+
+  beam-setup firstboot   grow the root partition, new SSH host keys            (once)
+  beam-setup config      apply beam.conf from the BEAMCONFIG partition          (every boot)
+  beam-setup tailscale   join the tailnet, publish HTTPS with `tailscale serve` (every boot)
+  beam-setup audio       Beam+ codec setup: speaker amplifier, mic inputs       (every boot)
+  beam-setup backup      read-only image of the robot's internal disk           (once)
+
+Progress for the person standing at the robot goes to /run/beam/setup.json,
+which the motor server passes to the robot screen.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+CONF = Path("/boot/efi/beam.conf")
+STATE = Path("/var/lib/beam")
+SETUP = Path("/run/beam/setup.json")
+SERVER_ENV = Path("/etc/beam/server.env")
+KIOSK_URL = Path("/etc/beam/kiosk-url")
+TS_KEY = STATE / "tailscale-authkey"
+SAVED = "(saved on robot)"
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def run(*cmd: str, check: bool = True, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, check=check, text=True, capture_output=True, **kw)
+
+
+def note(**fields) -> None:
+    """Merge fields into the setup notes shown on the robot screen (None removes a field)."""
+    SETUP.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(SETUP.read_text())
+    except (OSError, ValueError):
+        data = {}
+    for k, v in fields.items():
+        if v is None:
+            data.pop(k, None)
+        else:
+            data[k] = v
+    tmp = SETUP.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(SETUP)
+
+
+# --- beam.conf -----------------------------------------------------------------
+
+def read_conf() -> tuple[dict[str, str], list[str], list[str]]:
+    """Returns (settings, ssh_keys, raw_lines). Tolerates Windows line endings and a BOM."""
+    try:
+        text = CONF.read_text(encoding="utf-8-sig")
+    except OSError:
+        return {}, [], []
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    conf: dict[str, str] = {}
+    keys: list[str] = []
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k, v = k.strip().upper(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if k == "SSH_KEY":
+            if v:
+                keys.append(v)
+        else:
+            conf[k] = v
+    return conf, keys, lines
+
+
+def mark_saved(lines: list[str], names: set[str]) -> None:
+    """Replace secret values in beam.conf with a placeholder once they're stored on the robot."""
+    out = []
+    for line in lines:
+        k = line.split("=", 1)[0].strip().upper() if "=" in line and not line.lstrip().startswith("#") else ""
+        out.append(f"{k}={SAVED}" if k in names else line)
+    tmp = CONF.with_suffix(".tmp")
+    tmp.write_text("\r\n".join(out), encoding="utf-8")    # CRLF keeps Notepad happy
+    tmp.replace(CONF)
+    os.sync()
+
+
+def cmd_config() -> None:
+    conf, ssh_keys, lines = read_conf()
+    if not lines:
+        note(message="beam.conf not found on the BEAMCONFIG partition")
+        return
+    secrets_saved: set[str] = set()
+    messages = []
+
+    name = re.sub(r"[^a-z0-9-]", "", conf.get("ROBOT_NAME", "beam").lower()) or "beam"
+    if Path("/etc/hostname").read_text().strip() != name:
+        run("hostnamectl", "set-hostname", name, check=False)
+        hosts = Path("/etc/hosts").read_text()
+        Path("/etc/hosts").write_text(re.sub(r"^127\.0\.1\.1\s.*$", f"127.0.1.1\t{name}", hosts, flags=re.M))
+
+    # Wi-Fi
+    ssid, psk = conf.get("WIFI_SSID", ""), conf.get("WIFI_PASSWORD", "")
+    if ssid and psk != SAVED:
+        run("nmcli", "connection", "delete", "beam-wifi", check=False)
+        args = ["nmcli", "connection", "add", "type", "wifi", "con-name", "beam-wifi", "ifname", "*",
+                "ssid", ssid, "connection.autoconnect", "yes"]
+        if psk:
+            args += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk]
+        r = run(*args, check=False)
+        if r.returncode == 0:
+            log(f"Wi-Fi network '{ssid}' saved")
+            if psk:
+                secrets_saved.add("WIFI_PASSWORD")
+        else:
+            messages.append(f"Couldn't save Wi-Fi settings: {r.stderr.strip()}")
+    elif not ssid and run("nmcli", "-t", "-f", "NAME", "connection", "show", check=False).stdout.count("beam-wifi") == 0:
+        messages.append("No Wi-Fi set up yet: put WIFI_SSID and WIFI_PASSWORD in beam.conf on the USB stick")
+
+    # Tailscale auth key (consumed by `beam-setup tailscale`)
+    tskey = conf.get("TAILSCALE_AUTHKEY", "")
+    if tskey and tskey != SAVED:
+        STATE.mkdir(parents=True, exist_ok=True)
+        TS_KEY.write_text(tskey)
+        TS_KEY.chmod(0o600)
+        secrets_saved.add("TAILSCALE_AUTHKEY")
+
+    # Motor server options
+    token = conf.get("ACCESS_TOKEN", "")
+    try:
+        speed = min(1.0, max(0.1, float(conf.get("MAX_SPEED", "0.6"))))
+    except ValueError:
+        speed = 0.6
+    host = "0.0.0.0" if conf.get("LAN_ACCESS", "no").lower() in ("yes", "true", "1") else "127.0.0.1"
+    args = f"--host {host} --max-linear {speed}" + (f" --token {token}" if token else "")
+    brain_key = conf.get("BRAIN_KEY", "")
+    if brain_key:
+        if re.fullmatch(r"[A-Za-z0-9_-]{16,128}", brain_key):
+            args += f" --brain-key {brain_key}"
+        else:
+            messages.append("BRAIN_KEY must be 16+ letters, digits, - or _")
+    SERVER_ENV.parent.mkdir(parents=True, exist_ok=True)
+    old = SERVER_ENV.read_text() if SERVER_ENV.exists() else ""
+    new = f"BEAM_ARGS={args}\n"
+    SERVER_ENV.write_text(new)
+    SERVER_ENV.chmod(0o640)
+    KIOSK_URL.write_text("http://localhost:8080/robot" + (f"?token={token}" if token else "") + "\n")
+    if old and old != new:
+        # --no-block: beam-server is ordered After= this unit, so waiting here would deadlock.
+        run("systemctl", "--no-block", "try-restart", "beam-server.service", check=False)
+
+    # SSH keys for the admin user
+    if ssh_keys:
+        ssh = Path("/home/beam/.ssh")
+        ssh.mkdir(mode=0o700, exist_ok=True)
+        (ssh / "authorized_keys").write_text("\n".join(ssh_keys) + "\n")
+        (ssh / "authorized_keys").chmod(0o600)
+        shutil.chown(ssh, "beam", "beam")
+        shutil.chown(ssh / "authorized_keys", "beam", "beam")
+
+    if secrets_saved:
+        mark_saved(lines, secrets_saved)
+    note(message=" · ".join(messages) or None)
+
+
+# --- Tailscale -----------------------------------------------------------------
+
+def ts_status() -> dict:
+    r = run("tailscale", "status", "--json", check=False)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {}
+
+
+def cmd_tailscale() -> None:
+    conf, _, _ = read_conf()
+    name = re.sub(r"[^a-z0-9-]", "", conf.get("ROBOT_NAME", "beam").lower()) or "beam"
+    token = conf.get("ACCESS_TOKEN", "")
+    login: subprocess.Popen | None = None
+    login_started = 0.0
+
+    while True:
+        st = ts_status()
+        state = st.get("BackendState")
+        if state == "Running":
+            break
+        if state == "NeedsLogin":
+            if TS_KEY.exists():
+                key = TS_KEY.read_text().strip()
+                r = run("tailscale", "up", f"--authkey={key}", f"--hostname={name}", check=False, timeout=90)
+                if r.returncode == 0:
+                    TS_KEY.unlink()
+                    continue
+                note(message=f"Tailscale auth key was refused: {r.stderr.strip()[:200]}")
+                TS_KEY.unlink()                      # don't retry a bad key forever; fall back to a login link
+            # Interactive login: show the link on the robot screen. Links expire, so refresh every 10 min.
+            if login is None or login.poll() is not None or time.time() - login_started > 600:
+                if login is not None and login.poll() is None:
+                    login.terminate()
+                login = subprocess.Popen(["tailscale", "up", f"--hostname={name}", "--force-reauth"],
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                login_started = time.time()
+                threading.Thread(target=_watch_login_output, args=(login,), daemon=True).start()
+        time.sleep(3)
+
+    note(tailscale_login_url=None)
+    # Publish the server over HTTPS on the tailnet (not the internet). Idempotent.
+    r = run("tailscale", "serve", "--bg", "--https=443", "http://127.0.0.1:8080", check=False, timeout=120)
+    if r.returncode != 0:
+        note(message=f"tailscale serve failed (enable HTTPS certificates in the Tailscale admin console): "
+                     f"{r.stderr.strip()[:200]}")
+        sys.exit(1)
+    dns = ts_status().get("Self", {}).get("DNSName", "").rstrip(".")
+    url = f"https://{dns}/" + (f"?token={token}" if token else "")
+    note(url=url)
+    log(f"Robot published at {url}")
+
+
+def _watch_login_output(proc: subprocess.Popen) -> None:
+    for line in proc.stdout:
+        m = re.search(r"https://login\.tailscale\.com/\S+", line)
+        if m:
+            note(tailscale_login_url=m.group(0))
+            log(f"Tailscale login link: {m.group(0)}")
+
+
+# --- first boot ----------------------------------------------------------------
+
+def cmd_firstboot() -> None:
+    src = run("findmnt", "-no", "SOURCE", "/").stdout.strip()          # e.g. /dev/sdb2
+    disk = "/dev/" + run("lsblk", "-no", "PKNAME", src).stdout.strip()
+    part = re.search(r"(\d+)$", src).group(1)
+    r = run("growpart", disk, part, check=False)
+    log(f"growpart {disk} {part}: {r.stdout.strip() or r.stderr.strip()}")
+    run("resize2fs", src, check=False)
+    run("ssh-keygen", "-A")
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / "firstboot-done").touch()
+
+
+# --- internal disk backup -------------------------------------------------------
+
+def cmd_backup() -> None:
+    """Image the robot's own (internal, non-removable) disk once, read-only, before anything else happens."""
+    dest = STATE / "backup"
+    if any(dest.glob("*.img.zst")):
+        log("backup already present")
+        return
+    root_disk = run("lsblk", "-no", "PKNAME", run("findmnt", "-no", "SOURCE", "/").stdout.strip()).stdout.strip()
+    disks = json.loads(run("lsblk", "-J", "-b", "-d", "-o", "NAME,RM,SIZE,TYPE,MODEL,SERIAL,TRAN").stdout)["blockdevices"]
+    cands = [d for d in disks if d["type"] == "disk" and d["name"] != root_disk and not d["rm"]
+             and d.get("tran") != "usb" and 0 < int(d["size"]) <= 64 * 2**30]
+    if len(cands) != 1:
+        log(f"not backing up: expected one internal disk, found {[d['name'] for d in cands]}")
+        return
+    d = cands[0]
+    size = int(d["size"])
+    dest.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(dest).free < size:
+        log(f"not enough space for a backup of {d['name']} ({size >> 20} MiB)")
+        return
+    label = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{d.get('model') or 'disk'}-{d.get('serial') or d['name']}")
+    out = dest / f"{label}.img.zst"
+    part = out.with_suffix(".part")
+    log(f"backing up /dev/{d['name']} ({size >> 20} MiB) to {out}")
+    with open(part, "wb") as f:
+        dd = subprocess.Popen(["dd", f"if=/dev/{d['name']}", "bs=4M", "iflag=direct", "status=none"],
+                              stdout=subprocess.PIPE)
+        zs = subprocess.run(["zstd", "-T0", "-3", "-q", "-c"], stdin=dd.stdout, stdout=f)
+        dd.stdout.close()
+        if dd.wait() != 0 or zs.returncode != 0:
+            part.unlink(missing_ok=True)
+            raise SystemExit("backup failed")
+    part.rename(out)
+    (dest / "README.txt").write_text(
+        f"Read-only image of the robot's internal disk /dev/{d['name']} ({d.get('model')}, {size} bytes),\n"
+        f"taken {time.strftime('%Y-%m-%d %H:%M')}. Restore with: zstd -dc {out.name} | dd of=/dev/<disk> bs=4M\n")
+    log("backup complete")
+
+
+# --- audio ---------------------------------------------------------------------
+
+# Ported from Beam's cleveland_hda.sh. (nid, verb, param) for `hda-verb /dev/snd/hwC0D0`.
+ALC662 = (
+    [(0x02, 0x3B0, 0x80), (0x03, 0x3B0, 0x80), (0x04, 0x3B0, 0x80),   # mute all outputs
+     (0x03, 0x3A0, 0x54),                                             # left only, limited level (amp overload)
+     (0x0D, 0x371, 0x80), (0x0D, 0x370, 0x00),                        # mixer: mute other input, unmute PCM
+     (0x14, 0x70C, 0x02),                                             # EAPD: enable external speaker amplifier
+     (0x15, 0x390, 0x80), (0x15, 0x3A0, 0x00)]
+    + [(0x23, 0x370 + d, 0x80) for d in range(10)] + [(0x23, 0x373, 0x00)]   # ADC0 <- port E
+    + [(0x08, 0x370, 0x17), (0x1B, 0x370, 1), (0x1B, 0x707, 0x20)]
+    + [(0x22, 0x370 + d, 0x80) for d in range(10)] + [(0x22, 0x371, 0x00)]   # ADC1 <- port F (front mic)
+    + [(0x09, 0x370, 0x17), (0x19, 0x370, 1), (0x19, 0x707, 0x20)]
+)
+ALC262 = (
+    [(0x0D, 0x3B0, 0x1E), (0x24, 0x370, 0x00), (0x24, 0x371, 0x80)]
+    + [(0x24, 0x370 + d, 0x80) for d in range(2, 10)]
+    + [(0x07, 0x370, 0x18), (0x18, 0x370, 0), (0x18, 0x707, 0x24), (0x23, 0x370, 0x80), (0x23, 0x371, 0x00)]
+    + [(0x23, 0x370 + d, 0x80) for d in range(2, 10)]
+    + [(0x08, 0x370, 0x18), (0x19, 0x370, 0), (0x19, 0x707, 0x24),
+       (0x1B, 0x707, 0xE0), (0x1B, 0x701, 1), (0x22, 0x701, 3), (0x09, 0x370, 8)]
+)
+
+
+def cmd_audio() -> None:
+    chip_file = Path("/sys/class/sound/hwC0D0/chip_name")
+    for _ in range(30):                      # wait for the codec driver
+        if chip_file.exists():
+            break
+        time.sleep(1)
+    else:
+        log("no HD-audio codec found; skipping")
+        return
+    time.sleep(3)                            # Beam's script: let the driver finish initialising first
+    chip = chip_file.read_text().strip()
+    verbs = ALC662 if "ALC662" in chip else ALC262 if "ALC262" in chip else None
+    if verbs is None:
+        log(f"codec {chip} is not a Beam+ codec; skipping")
+        return
+    for nid, verb, param in verbs:
+        run("hda-verb", "/dev/snd/hwC0D0", hex(nid), hex(verb), hex(param), check=False)
+    log(f"applied {len(verbs)} {chip} settings")
+
+
+COMMANDS = {"firstboot": cmd_firstboot, "config": cmd_config, "tailscale": cmd_tailscale,
+            "audio": cmd_audio, "backup": cmd_backup}
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
+        sys.exit(f"usage: beam-setup {{{'|'.join(COMMANDS)}}}")
+    COMMANDS[sys.argv[1]]()

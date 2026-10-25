@@ -1,0 +1,14 @@
+[Unit]
+Description=Join Tailscale and publish the driving page over HTTPS
+After=tailscaled.service beam-config.service network-online.target
+Wants=tailscaled.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/beam-setup tailscale
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

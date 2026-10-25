@@ -1,0 +1,29 @@
+# Real robot settings: Wi-Fi password, Tailscale key, brain key. Never commit.
+# (Only at the top level: other beam.conf files in image/ are system config and the blank template.)
+/beam.conf
+
+# Keys, certificates, secrets
+*.key
+*.pem
+certs/
+.env
+
+# USB images (large, and contain keys)
+*.img
+*.img.xz
+*.img.xz.sha256
+
+# Test photos of people (bring your own; see tests/data/README.md)
+tests/data/*.jpg
+tests/data/*.png
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Marker left by scripts/make-public-copy.sh, and its private list of personal details
+.beam-revival-public-copy
+.public-copy-substitutions

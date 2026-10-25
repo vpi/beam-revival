@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beam+ Robot</title>
+<style>
+  /* Shown on the robot's own screen (Chromium kiosk). Always dark: it faces a room, not a desk. */
+  :root { --bg: #0d1014; --text: #e9edf2; --muted: #8d97a5; --ok: #39c477; --warn: #e2a72e; --bad: #f05d5d; --line: #262c34; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  body { display: grid; place-items: center; cursor: none; }
+  .face { text-align: center; }
+  .face h1 { font-size: 7vmin; font-weight: 700; margin: 0 0 1vmin; letter-spacing: -.01em; }
+  .face p { font-size: 3vmin; color: var(--muted); margin: 0; }
+  .eyes { display: flex; gap: 10vmin; justify-content: center; margin-bottom: 5vmin; }
+  .eye { width: 9vmin; height: 9vmin; border-radius: 50%; background: var(--text); animation: blink 6s infinite; }
+  @keyframes blink { 0%, 96%, 100% { transform: scaleY(1); } 98% { transform: scaleY(.1); } }
+  body.live .eye { background: var(--ok); }
+  .corner { position: fixed; left: 2vmin; bottom: 2vmin; display: flex; gap: 2vmin; align-items: center;
+            color: var(--muted); font-size: 2.2vmin; }
+  .dot { width: 1.4vmin; height: 1.4vmin; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: .6vmin; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+  .selfview { position: fixed; right: 2vmin; bottom: 2vmin; width: 22vmin; border-radius: 1.2vmin;
+              border: 1px solid var(--line); background: #000; transform: scaleX(-1); }
+  .error { position: fixed; bottom: 8vmin; left: 50%; transform: translateX(-50%); background: var(--bad); color: #fff;
+           padding: 1vmin 2vmin; border-radius: 1vmin; font-size: 2.2vmin; display: none; max-width: 90vw; }
+  .setup { position: fixed; top: 3vmin; left: 50%; transform: translateX(-50%); width: min(88vw, 120vmin);
+           background: #161b22; border: 1px solid var(--line); border-radius: 1.6vmin; padding: 2.4vmin 3vmin;
+           font-size: 2.6vmin; display: none; text-align: center; }
+  .setup b { display: block; font-size: 3vmin; margin-bottom: .8vmin; }
+  .setup code { display: block; font: 600 3.2vmin ui-monospace, monospace; color: var(--ok); margin-top: .8vmin; word-break: break-all; }
+  .setup .warn { color: var(--warn); }
+  .sound { position: fixed; top: 2vmin; right: 2vmin; display: none; padding: 1vmin 2vmin; border-radius: 1vmin;
+           border: 1px solid var(--line); background: #1a1f26; color: var(--text); font-size: 2.2vmin; cursor: pointer; }
+  /* Shown whenever the brain is connected, so people in the room know faces are being recognised. */
+  .brain-ind { color: var(--warn); display: none; }
+  .brain-ind.on { display: inline; }
+  .bubble { position: fixed; left: 50%; bottom: 16vmin; transform: translateX(-50%); max-width: 80vw;
+            background: var(--text); color: var(--bg); font-size: 5vmin; font-weight: 700; padding: 1.6vmin 3.2vmin;
+            border-radius: 3vmin; opacity: 0; transition: opacity .3s; text-align: center; }
+  .bubble.show { opacity: 1; }
+  .bubble.ai { background: var(--ai); color: #fff; }
+  /* The AI is in charge: impossible to miss, and never the same look as a person. */
+  :root { --ai: #7c4dff; }
+  .ai-banner { position: fixed; top: 0; left: 0; right: 0; background: var(--ai); color: #fff; text-align: center;
+               font-size: 3.4vmin; font-weight: 700; padding: 1.4vmin 2vmin; display: none; z-index: 5; }
+  .ai-banner small { display: block; font-size: 2.4vmin; font-weight: 500; opacity: .9; }
+  .ai-banner.on { display: block; }
+  body.ai-active .eye { background: var(--ai); }
+</style>
+</head>
+<body>
+  <div class="face">
+    <div class="eyes"><div class="eye"></div><div class="eye"></div></div>
+    <h1 id="title">Starting…</h1>
+    <p id="subtitle"></p>
+  </div>
+  <div class="corner">
+    <span><span id="srvDot" class="dot"></span><span id="srvText">server</span></span>
+    <span id="battery"></span>
+    <span id="brainInd" class="brain-ind">● face recognition on</span>
+  </div>
+  <div id="bubble" class="bubble"></div>
+  <div id="aiBanner" class="ai-banner"></div>
+  <video id="self" class="selfview" autoplay muted playsinline></video>
+  <div id="error" class="error"></div>
+  <div id="setup" class="setup"></div>
+  <button id="sound" class="sound">Enable sound</button>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const token = params.get("token");
+  const TEST = params.has("test");
+  const q = token ? "token=" + encodeURIComponent(token) : "";
+  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?role=robot${q ? "&" + q : ""}`;
+  const ICE = { iceServers: [] };              // LAN / Tailscale: host candidates are enough
+
+  const peers = new Map();                     // pilot id -> { pc, audio }
+  let ws = null, media = null;
+
+  // ---------- local media ----------
+  async function getMedia() {
+    if (TEST) return testMedia();
+    // One permission prompt (auto-granted in kiosk mode), then pick cameras by label.
+    const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    probe.getTracks().forEach((t) => t.stop());
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    const pick = (hint, fallback) => (hint && cams.find((c) => c.label.toLowerCase().includes(hint.toLowerCase()))) || fallback;
+    // Beam+ cameras by USB id (from Beam's udev rules); Chrome on Linux appends "(vid:pid)" to labels.
+    const headCam = pick(params.get("head") || "25a1:0006", cams[0]);
+    const navCam = pick(params.get("nav") || "25a1:0007", cams.find((c) => c !== headCam));
+
+    const head = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: headCam.deviceId }, width: 640, height: 480, frameRate: 30 },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    let nav = null;
+    if (navCam) {
+      try {
+        nav = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: navCam.deviceId }, width: 320, height: 240, frameRate: 15 },
+        });
+      } catch (e) { console.warn("nav camera unavailable", e); }
+    }
+    return { head, nav, labels: { head: headCam.label, nav: navCam ? navCam.label : null } };
+  }
+
+  // Test mode: animated test patterns and a beeping tone instead of real devices.
+  // With &face=1 the head pattern shows a face photo (served by a dev server) for the brain to find.
+  function testMedia() {
+    let faceImg = null;
+    if (params.has("face")) { faceImg = new Image(); faceImg.src = "/test/face.jpg"; }
+    const pattern = (w, h, label, hue, withFace) => {
+      const c = Object.assign(document.createElement("canvas"), { width: w, height: h });
+      const g = c.getContext("2d");
+      const draw = () => {
+        const t = performance.now();
+        g.fillStyle = `hsl(${hue}, 35%, 18%)`; g.fillRect(0, 0, w, h);
+        if (withFace && faceImg && faceImg.complete && faceImg.naturalWidth) {
+          const s = 0.9 * Math.min(w / faceImg.naturalWidth, h / faceImg.naturalHeight);
+          const fw = faceImg.naturalWidth * s, fh = faceImg.naturalHeight * s;
+          g.drawImage(faceImg, (w - fw) / 2 + Math.sin(t / 1500) * w * 0.04, (h - fh) / 2, fw, fh);
+        }
+        for (let i = 0; i < 8; i++) {
+          g.fillStyle = `hsl(${(hue + i * 40) % 360}, 70%, 55%)`;
+          g.fillRect((i * w) / 8, h * 0.92, w / 8, h * 0.08);
+        }
+        const x = (w / 2) + Math.sin(t / 600) * w * 0.35;
+        if (!withFace) { g.fillStyle = "#fff"; g.beginPath(); g.arc(x, h * 0.42, h * 0.12, 0, Math.PI * 2); g.fill(); }
+        g.fillStyle = "#fff";
+        g.font = `bold ${Math.round(h / 12)}px system-ui`; g.fillText(label, 12, h / 10 + 8);
+        g.font = `${Math.round(h / 16)}px ui-monospace, monospace`;
+        g.fillText(new Date().toLocaleTimeString(), 12, h / 10 + 8 + h / 12);
+      };
+      // A timer, not requestAnimationFrame: rAF stops in background tabs, which would freeze the stream.
+      setInterval(draw, 33);
+      return c.captureStream(30);
+    };
+    // &world=1: the simulator's virtual house (dev server only). Head = its camera, nav inset = the map.
+    const feed = (url, w, h, fps) => {
+      const c = Object.assign(document.createElement("canvas"), { width: w, height: h });
+      const g = c.getContext("2d");
+      let busy = false;
+      setInterval(async () => {
+        if (busy) return;
+        busy = true;
+        try {
+          const bmp = await createImageBitmap(await (await fetch(url, { cache: "no-store" })).blob());
+          const s = Math.min(w / bmp.width, h / bmp.height);
+          g.fillStyle = "#000"; g.fillRect(0, 0, w, h);
+          g.drawImage(bmp, (w - bmp.width * s) / 2, (h - bmp.height * s) / 2, bmp.width * s, bmp.height * s);
+        } catch (e) { /* world restarting */ } finally { busy = false; }
+      }, 1000 / fps);
+      return c.captureStream(fps);
+    };
+    const WORLD = params.has("world");
+    const ac = new AudioContext();
+    const osc = ac.createOscillator(), gain = ac.createGain(), dest = ac.createMediaStreamDestination();
+    osc.frequency.value = 440; gain.gain.value = 0;
+    osc.connect(gain).connect(dest); osc.start();
+    if (!WORLD) setInterval(() => { gain.gain.setValueAtTime(0.15, ac.currentTime); gain.gain.setValueAtTime(0, ac.currentTime + 0.15); }, 2000);
+    const head = WORLD ? feed("/test/camera.jpg", 640, 480, 10) : pattern(640, 480, "TEST · head camera", 210, true);
+    head.addTrack(dest.stream.getAudioTracks()[0]);
+    const nav = WORLD ? feed("/test/nav.jpg", 320, 240, 5) : pattern(320, 240, "TEST · nav camera", 30);
+    return { head, nav, labels: { head: "test pattern", nav: "test pattern" } };
+  }
+
+  // ---------- peers ----------
+  async function onHello(id) {
+    closePeer(id);
+    const pc = new RTCPeerConnection(ICE);
+    const peer = { pc, audio: null };
+    peers.set(id, peer);
+
+    for (const t of media.head.getTracks()) pc.addTrack(t, media.head);   // head video + mic (sendrecv audio)
+    if (media.nav) for (const t of media.nav.getVideoTracks()) pc.addTrack(t, media.nav);
+    if (!media.head.getAudioTracks().length) pc.addTransceiver("audio", { direction: "recvonly" });
+
+    pc.onicecandidate = (e) => e.candidate && sendTo(id, { kind: "ice", candidate: e.candidate });
+    pc.ontrack = (e) => {
+      if (e.track.kind !== "audio") return;
+      peer.audio = new Audio();
+      peer.audio.srcObject = new MediaStream([e.track]);
+      playAudio(peer.audio);
+    };
+    pc.onconnectionstatechange = () => {
+      if (["failed", "closed"].includes(pc.connectionState)) closePeer(id);
+      render();
+    };
+    await pc.setLocalDescription(await pc.createOffer());
+    sendTo(id, { kind: "offer", sdp: pc.localDescription,
+                 streams: { head: media.head.id, nav: media.nav ? media.nav.id : null } });
+    render();
+  }
+
+  async function onRtc(from, data) {
+    if (data.kind === "hello") return onHello(from);
+    if (data.kind === "bye") return closePeer(from);
+    const peer = peers.get(from);
+    if (!peer) return;
+    if (data.kind === "answer") await peer.pc.setRemoteDescription(data.sdp);
+    else if (data.kind === "ice") { try { await peer.pc.addIceCandidate(data.candidate); } catch (e) { console.warn(e); } }
+  }
+
+  function closePeer(id) {
+    const peer = peers.get(id);
+    if (!peer) return;
+    peers.delete(id);
+    if (peer.audio) peer.audio.srcObject = null;
+    peer.pc.close();
+    render();
+  }
+
+  function playAudio(el) {
+    el.play().catch(() => {
+      // Kiosk mode starts Chromium with --autoplay-policy=no-user-gesture-required; elsewhere a tap is needed.
+      const b = $("sound");
+      b.style.display = "block";
+      b.onclick = () => { for (const p of peers.values()) p.audio && p.audio.play(); b.style.display = "none"; };
+    });
+  }
+
+  // ---------- signaling ----------
+  function sendTo(to, data) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "rtc", to, data })); }
+  function connect() {
+    ws = new WebSocket(wsUrl);
+    ws.onopen = () => { $("srvDot").className = "dot ok"; $("srvText").textContent = "server"; render(); };
+    ws.onclose = (ev) => {
+      for (const id of [...peers.keys()]) closePeer(id);
+      setFrameRate(0);
+      $("brainInd").classList.remove("on");
+      seenNames = []; pilotNames = {};
+      if (ev.code === 4000) {
+        // Another robot screen took over (see signaling.REPLACED_CLOSE_CODE). Reconnecting
+        // would knock that one off in turn, so stand down until reloaded.
+        $("srvDot").className = "dot bad"; $("srvText").textContent = "replaced";
+        showError("Another robot screen is active. Reload this page to take over.");
+        $("title").textContent = "Standing by";
+        $("subtitle").textContent = "Another robot screen is in charge";
+        return;
+      }
+      $("srvDot").className = "dot bad"; $("srvText").textContent = "server offline";
+      setTimeout(connect, 1000);
+    };
+    ws.onerror = () => ws.close();
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "rtc") onRtc(m.from, m.data);
+      else if (m.type === "frames") setFrameRate(m.fps);
+      else if (m.type === "brain") {
+        $("brainInd").classList.toggle("on", !!m.online);
+        $("brainInd").textContent = m.paused ? "● face recognition paused" : "● face recognition on";
+      }
+      else if (m.type === "say") say(m);
+      else if (m.type === "seen") { seenNames = m.names || []; render(); }
+      else if (m.type === "ai") showAi(m);
+      else if (m.type === "pilots") { pilotNames = m.names || {}; render(); }
+      else if (m.type === "show") showBubble(m.text, (m.seconds || 5) * 1000);
+    };
+  }
+
+  // ---------- brain: camera frames out, speech and captions in ----------
+  let frameTimer = null;
+  const grab = document.createElement("canvas");
+  function setFrameRate(fps) {
+    clearInterval(frameTimer); frameTimer = null;
+    if (fps > 0) frameTimer = setInterval(sendFrame, 1000 / fps);
+  }
+  // The floor (nav) camera is not on screen; a hidden video element lets us grab its frames too.
+  const navVideo = Object.assign(document.createElement("video"), { muted: true, playsInline: true, autoplay: true });
+  function sendFrame() {
+    if (!ws || ws.readyState !== 1) return;
+    if (ws.bufferedAmount > 256 * 1024) return;   // slow link: skip frames instead of queueing them
+    if (media && media.nav && navVideo.srcObject !== media.nav) navVideo.srcObject = media.nav;
+    for (const [cam, v, maxW] of [["head", $("self"), 640], ["nav", navVideo, 320]]) {
+      if (!v.videoWidth) continue;
+      const scale = Math.min(1, maxW / v.videoWidth);
+      grab.width = Math.round(v.videoWidth * scale); grab.height = Math.round(v.videoHeight * scale);
+      grab.getContext("2d").drawImage(v, 0, 0, grab.width, grab.height);
+      const jpeg = grab.toDataURL("image/jpeg", 0.75).split(",")[1];
+      // "type" first: the server spots frames by their prefix and relays them without parsing.
+      ws.send(JSON.stringify({ type: "frame", cam, w: grab.width, h: grab.height, jpeg }));
+    }
+  }
+  let bubbleTimer = null;
+  function showBubble(text, ms, ai = false) {
+    const b = $("bubble");
+    b.textContent = text; b.classList.add("show"); b.classList.toggle("ai", ai);
+    clearTimeout(bubbleTimer); bubbleTimer = setTimeout(() => b.classList.remove("show"), ms);
+  }
+  function showAi(m) {
+    const b = $("aiBanner");
+    document.body.classList.toggle("ai-active", !!m.active);
+    if (m.active) {
+      b.textContent = `🤖 AI is driving${m.action ? " · " + m.action : ""}`;
+      const small = document.createElement("small");
+      small.textContent = `Task: ${m.task || ""}`;
+      b.appendChild(small);
+      b.classList.add("on");
+    } else {
+      b.textContent = `🤖 AI finished: ${m.outcome || ""}`;
+      setTimeout(() => { if (!document.body.classList.contains("ai-active")) b.classList.remove("on"); }, 5000);
+    }
+  }
+  function say(m) {
+    const ai = m.by === "ai";
+    if (m.text) showBubble(ai ? `🤖 AI: ${m.text}` : m.text, 6000, ai);
+    if (!m.wav) return;
+    const a = new Audio("data:audio/wav;base64," + m.wav);
+    a.play().catch(() => {});                // kiosk autoplay is allowed; elsewhere it may be blocked
+  }
+
+  // ---------- screen ----------
+  // Who the robot sees (from the brain) and who's connected on video (names from Tailscale).
+  let seenNames = [], pilotNames = {};
+  const joinNames = (a) => a.length <= 1 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1];
+
+  function render() {
+    const connected = [...peers].filter(([, p]) => p.pc.connectionState === "connected").map(([id]) => id);
+    const live = connected.length;
+    document.body.classList.toggle("live", live > 0 || seenNames.length > 0);
+
+    const named = [...new Set(connected.map((id) => pilotNames[id]).filter(Boolean))];
+    const unnamed = connected.filter((id) => !pilotNames[id]).length;
+    let drivers = joinNames(named);
+    if (unnamed) {
+      const others = unnamed === 1 ? "someone" : `${unnamed} others`;
+      drivers = named.length ? `${drivers} and ${others}` : (unnamed === 1 ? "Someone" : `${unnamed} people`);
+    }
+    const is = named.length + unnamed > 1 ? "are" : "is";
+
+    if (seenNames.length) {
+      $("title").textContent = `Hi ${joinNames(seenNames)}!`;
+      $("subtitle").textContent = live ? `${drivers} ${is} connected` : "Nice to see you";
+    } else if (live) {
+      $("title").textContent = `${drivers} ${is} here`;
+      $("subtitle").textContent = "Say hello!";
+    } else {
+      $("title").textContent = "Beam is ready";
+      $("subtitle").textContent = "Waiting for a driver to connect";
+    }
+  }
+  async function pollBattery() {
+    try {
+      const s = await fetch("/api/status" + (q ? "?" + q : "")).then((r) => r.json());
+      const b = s.board;
+      $("battery").textContent = b && b.battery_percent != null ? `battery ${b.battery_percent.toFixed(0)}%${b.charging ? " · charging" : ""}` : "";
+      renderSetup(s.setup, s.link);
+    } catch (e) { /* server restarting */ }
+  }
+
+  // Setup notes written by the robot image (no keyboard on a robot, so the screen does the talking).
+  function renderSetup(setup, link) {
+    const box = $("setup");
+    const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    const parts = [];
+    if (setup && setup.tailscale_login_url) {
+      parts.push(`<b>Finish setup</b>Open this link on your phone or computer to add the robot to your Tailscale account:<code>${esc(setup.tailscale_login_url)}</code>`);
+    } else if (setup && setup.url && !peers.size) {
+      parts.push(`<b>Drive me at</b><code>${esc(setup.url)}</code>`);
+    }
+    if (setup && setup.message) parts.push(`<div class="warn">${esc(setup.message)}</div>`);
+    if (link && !link.connected) parts.push(`<div class="warn">Motor board not connected${link.last_error ? ": " + esc(link.last_error) : ""}</div>`);
+    box.innerHTML = parts.join("");
+    box.style.display = parts.length ? "block" : "none";
+  }
+
+  // For troubleshooting from the console.
+  window.beamDebug = async () => Promise.all([...peers].map(async ([id, p]) => {
+    let audioBytesIn = 0;
+    (await p.pc.getStats()).forEach((s) => { if (s.type === "inbound-rtp" && s.kind === "audio") audioBytesIn += s.bytesReceived; });
+    return { id, connection: p.pc.connectionState, ice: p.pc.iceConnectionState, audioBytesIn };
+  }));
+
+  function showError(text) { const e = $("error"); e.textContent = text; e.style.display = "block"; }
+
+  (async () => {
+    pollBattery(); setInterval(pollBattery, 3000);   // setup notes must show even if the cameras fail
+    try {
+      media = await getMedia();
+      $("self").srcObject = media.head;
+    } catch (e) {
+      showError("Camera/microphone unavailable: " + e.message);
+      $("title").textContent = "Camera not found";
+      $("subtitle").textContent = "Retrying in 30 seconds";
+      setTimeout(() => location.reload(), 30000);    // cameras can appear late after boot
+      return;
+    }
+    render();
+    connect();
+  })();
+})();
+</script>
+</body>
+</html>

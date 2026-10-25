@@ -1,0 +1,11 @@
+[Unit]
+Description=Beam+ audio codec setup (speaker amplifier, microphones)
+After=sound.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/beam-setup audio
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

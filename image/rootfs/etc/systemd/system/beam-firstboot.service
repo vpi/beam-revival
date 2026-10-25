@@ -1,0 +1,14 @@
+[Unit]
+Description=Beam+ first boot (grow root partition, SSH host keys)
+ConditionPathExists=!/var/lib/beam/firstboot-done
+DefaultDependencies=no
+After=local-fs.target
+Before=ssh.service beam-config.service sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/beam-setup firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

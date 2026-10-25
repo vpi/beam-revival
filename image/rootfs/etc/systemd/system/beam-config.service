@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply beam.conf (Wi-Fi, Tailscale key, server options)
+After=beam-firstboot.service NetworkManager.service boot-efi.mount
+Wants=NetworkManager.service
+RequiresMountsFor=/boot/efi
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/beam-setup config
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
