@@ -18,7 +18,8 @@ software again.
 
 ## 0. Build the image
 
-There's no ready-made download yet: you build the image yourself. It's one script, and it takes 15–30 minutes.
+You build the image yourself: there's deliberately no ready-made download (the README explains why).
+It's one script, and it takes 15–30 minutes.
 
 **You need** a 64-bit PC or virtual machine with **Ubuntu 24.04 or newer, or Debian 12 or newer**, with
 `sudo`, an internet connection and **15 GB of free disk space**. A VirtualBox, VMware or Hyper-V VM works.

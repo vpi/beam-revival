@@ -55,6 +55,14 @@ All in [docs/robot-usb.md](docs/robot-usb.md), step by step:
 
 The robot's own software is untouched: take the stick out and it boots Beam's original system again.
 
+### Why there's no ready-made image to download
+
+You build the stick yourself from this repository. That takes about 20 minutes, and it means you can
+see exactly what ends up on your robot: one readable script (`image/build-image.sh`), this project's
+code, and packages fetched from Debian's and Tailscale's official servers. The image then contains only
+your own SSH key and settings. A ready-made image would ask you to trust a large file from a stranger,
+which nobody can practically inspect, on a device with cameras and a microphone in your home.
+
 **No robot?** You can try the driving page against the simulator (see
 [Run it against the simulator](#run-it-against-the-simulator)).
 
