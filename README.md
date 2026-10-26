@@ -147,7 +147,7 @@ in place of the cameras. Logs are in `/tmp/beam-sim.log` and `/tmp/beam-server.l
 Simulator options (`python3 -m beamctl.sim --help`) can inject corrupted or dropped replies.
 
 ```bash
-python3 -m pytest -q        # 65 tests, about a minute and a half
+python3 -m pytest -q        # 80 tests, about a minute and a half
 ```
 
 ## Safety behaviour
