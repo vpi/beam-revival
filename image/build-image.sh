@@ -106,6 +106,9 @@ in_root apt-get install -y -qq tailscale >>/var/tmp/beam-apt.log
 step "Installing beam-revival"
 mkdir -p "$ROOT/opt/beam-revival"
 cp -r "$PROJECT/beamctl" "$PROJECT/docs" "$PROJECT/README.md" "$ROOT/opt/beam-revival/"
+# Which code this image runs (shown on the driving page): BEAM_VERSION, a VERSION file, or git.
+echo "${BEAM_VERSION:-$(cat "$PROJECT/VERSION" 2>/dev/null || git -C "$PROJECT" describe --tags --always --dirty 2>/dev/null || echo unknown)}" \
+  > "$ROOT/opt/beam-revival/VERSION"
 find "$ROOT/opt/beam-revival" -name __pycache__ -prune -exec rm -rf {} +
 in_root python3 -m compileall -q /opt/beam-revival/beamctl
 cp -r "$HERE/rootfs/." "$ROOT/"

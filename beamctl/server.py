@@ -36,6 +36,10 @@ from .sleep import Backlight, SleepManager
 
 log = logging.getLogger("beam.server")
 WEB_DIR = Path(__file__).parent / "web"
+try:        # written by build-image.sh / deploy-robot.sh: which release this robot runs
+    VERSION = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+except OSError:
+    VERSION = "development"
 
 
 @dataclass
@@ -301,6 +305,7 @@ class MotorController:
         link, drive = self.link, self.drive
         return {
             "type": "status",
+            "version": VERSION,
             "link": {
                 "connected": link.connected and now - link.last_reply < 0.5,
                 "device": self.cfg.device,

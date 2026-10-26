@@ -69,6 +69,29 @@ which nobody can practically inspect, on a device with cameras and a microphone 
 **No robot?** You can try the driving page against the simulator (see
 [Run it against the simulator](#run-it-against-the-simulator)).
 
+## Features: core and optional
+
+The USB image always contains the core. Optional features are switched on in `beam.conf`, so the
+default stick is the bare minimum; nothing extra runs unless you enable it.
+
+| Feature | Status | Needs | How to enable |
+|---|---|---|---|
+| Driving, live video, two-way audio, charging, remote access | **core**, tested on a Beam+ | the robot, Wi-Fi, Tailscale (recommended) | always on |
+| Sleep mode (button) | **core**, tested | – | always available |
+| Nightly sleep schedule | optional, tested | – | `SLEEP_HOURS`, `TIMEZONE` in `beam.conf` |
+| Face recognition and spoken greetings | **experimental** | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
+| AI driving | **experimental**, simulator only so far | the brain, plus an AI provider API key | see [docs/ai-driving.md](docs/ai-driving.md) |
+
+## Versions
+
+Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
+robot you rely on**: `git checkout v1.0` before `sudo image/build-image.sh`. The latest code on `main`
+is for trying new things. The driving page shows which version a robot runs (Link → Software).
+
+A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one
+(`build-image.sh --variant lab`, robot name `beam-lab`) for new features. `scripts/deploy-robot.sh`
+refuses to update a stable stick with anything but a clean release tag.
+
 ## What's in here
 
 | Part | What it does |

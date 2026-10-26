@@ -27,3 +27,6 @@ venv/
 # Marker left by scripts/make-public-copy.sh, and its private list of personal details
 .beam-revival-public-copy
 .public-copy-substitutions
+
+# Written by build-image.sh / deploy-robot.sh
+/VERSION

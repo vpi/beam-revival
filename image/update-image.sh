@@ -13,6 +13,8 @@ trap 'umount "$MNT" 2>/dev/null; losetup -d "$LOOP"; rmdir "$MNT"' EXIT
 mount "${LOOP}p2" "$MNT"
 rm -rf "$MNT/opt/beam-revival/beamctl"
 cp -r "$PROJECT/beamctl" "$PROJECT/docs" "$PROJECT/README.md" "$MNT/opt/beam-revival/"
+echo "${BEAM_VERSION:-$(cat "$PROJECT/VERSION" 2>/dev/null || git -C "$PROJECT" describe --tags --always --dirty 2>/dev/null || echo unknown)}" \
+  > "$MNT/opt/beam-revival/VERSION"
 find "$MNT/opt/beam-revival" -name __pycache__ -prune -exec rm -rf {} +
 chroot "$MNT" python3 -m compileall -q /opt/beam-revival/beamctl
 cp -r "$HERE/rootfs/." "$MNT/"

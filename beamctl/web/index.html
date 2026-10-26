@@ -209,6 +209,7 @@
       <div class="row"><span>Timeouts / CRC errors</span><span class="num" id="errors">—</span></div>
       <div class="row"><span>Board latency</span><span class="num" id="latency">—</span></div>
       <div class="row"><span>Power watchdog</span><span class="num" id="watchdog">—</span></div>
+      <div class="row"><span>Software</span><span class="num" id="version">—</span></div>
     </div>
   </aside>
 </main>
@@ -552,6 +553,7 @@
     $("replies").textContent = L.replies.toLocaleString();
     $("errors").textContent = `${L.timeouts} / ${L.crc_errors}`;
     $("watchdog").textContent = L.watchdog_age_s == null ? "—" : `refreshed ${L.watchdog_age_s.toFixed(1)} s ago`;
+    $("version").textContent = m.version || "—";
     if (!B) return;
     const pct = B.battery_percent;
     $("battBar").style.width = (pct ?? 0) + "%";
