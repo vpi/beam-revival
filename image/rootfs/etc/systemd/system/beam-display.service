@@ -1,0 +1,11 @@
+[Unit]
+Description=Beam+ display power follows sleep mode (screen and floor lights off while asleep)
+After=beam-server.service
+
+[Service]
+ExecStart=/usr/local/sbin/beam-setup display
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

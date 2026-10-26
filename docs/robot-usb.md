@@ -103,7 +103,7 @@ Unplug and replug the stick. Windows shows a drive called **BEAMCONFIG**. Open `
 | `ACCESS_TOKEN` | Optional extra lock on top of Tailscale. |
 | `LAN_ACCESS` | `yes` also serves plain `http://<robot-ip>:8080` at home (no Talk there). |
 | `TIMEZONE` | Your time zone, like `America/Vancouver` or `Europe/Berlin`. Empty means UTC. Used by `SLEEP_HOURS`. |
-| `SLEEP_HOURS` | Optional nightly sleep, like `23:00-07:00`: cameras, microphone, screen and driving off. (The two lights beside the floor camera stay on: they're wired to the robot's power. The charging light stays green.) It wakes by itself at the end, or any time from the driving page (**Wake up**). It never falls asleep while someone is driving. The driving page also has a **Put to sleep** button. |
+| `SLEEP_HOURS` | Optional nightly sleep, like `23:00-07:00`: cameras, microphone, screen, the floor-camera lights and driving off. The robot-screen app is stopped and the display powered down; the lights beside the floor camera share the display's power. The charging light stays green. It wakes by itself at the end, or any time from the driving page (**Wake up**). It never falls asleep while someone is driving. The driving page also has a **Put to sleep** button. |
 | `SSH_KEY` | Public keys allowed to SSH in as `beam` (one `SSH_KEY=` line each). Filled in with the key you gave `build-image.sh --ssh-key`. Without any key, SSH logins are impossible: there are no passwords. |
 
 On boot, the robot moves the Wi-Fi password and Tailscale key into its system and replaces

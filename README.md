@@ -195,8 +195,9 @@ python3 -m pytest -q        # 82 tests, about a minute and a half
   cable on the motor board in the base: lifting the robot's top can pull it loose.
 - **Cameras appear a few seconds after the screen.** They need their firmware loaded at every
   power-on; the stick copies it from the robot's own disk the first time.
-- **The two lights beside the floor camera are always on** while the robot is on, sleep mode
-  included. They're wired to its power; no software switch for them has turned up.
+- **The two lights beside the floor camera are switched with the screen's panel power,** not by
+  brightness. Sleep mode powers the display down, so they go off too. (You'll also see them blink
+  when the screen changes resolution at boot.)
 
 What we learned about the hardware is in [docs/motor-protocol.md](docs/motor-protocol.md), section 8.
 

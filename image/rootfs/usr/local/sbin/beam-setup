@@ -7,6 +7,7 @@
   beam-setup audio       Beam+ codec setup: speaker amplifier, mic inputs       (every boot)
   beam-setup backup      read-only image of the robot's internal disk           (once)
   beam-setup cameras     load camera firmware (copied from the internal disk)    (boot, camera plug-in)
+  beam-setup display     display power follows sleep mode (floor lights too)    (always running)
 
 Progress for the person standing at the robot goes to /run/beam/setup.json,
 which the motor server passes to the robot screen.
@@ -379,6 +380,48 @@ def cmd_cameras() -> None:
     note(camera=f"{' and '.join(missing).capitalize()} camera not working" if missing else None)
 
 
+# --- display power in sleep mode -------------------------------------------------
+
+SLEEP_STATE = Path("/var/lib/beam-server/sleep.json")      # written by the motor server (beamctl/sleep.py)
+FB_BLANK = Path("/sys/class/graphics/fb0/blank")
+
+
+def asleep_now() -> bool:
+    try:
+        return bool(json.loads(SLEEP_STATE.read_text()).get("asleep"))
+    except (OSError, ValueError):
+        return False                                       # no state yet: awake
+
+
+def cmd_display() -> None:
+    """While the robot sleeps: stop the robot screen (Chromium) and power the display down.
+
+    On a Beam+ the two lights beside the floor camera are switched with the display panel, so they go off
+    too (brightness 0 alone leaves them on). Applies the current state at start, so a restart of this
+    service can never leave the screen dark while the robot is awake."""
+    applied: bool | None = None
+    while True:
+        asleep = asleep_now()
+        if asleep != applied:
+            if asleep:
+                run("systemctl", "stop", "getty@tty1.service", check=False)     # the robot screen's session
+                time.sleep(1)
+                try:
+                    FB_BLANK.write_text("4")                    # FB_BLANK_POWERDOWN: panel off
+                except OSError as e:
+                    log(f"can't power the display down: {e}")
+                log("asleep: robot screen stopped, display off")
+            else:
+                try:
+                    FB_BLANK.write_text("0")
+                except OSError as e:
+                    log(f"can't power the display up: {e}")
+                run("systemctl", "start", "getty@tty1.service", check=False)
+                log("awake: display on, robot screen started")
+            applied = asleep
+        time.sleep(2)
+
+
 # --- audio ---------------------------------------------------------------------
 
 # Ported from Beam's cleveland_hda.sh. (nid, verb, param) for `hda-verb /dev/snd/hwC0D0`.
@@ -424,7 +467,7 @@ def cmd_audio() -> None:
 
 
 COMMANDS = {"firstboot": cmd_firstboot, "config": cmd_config, "tailscale": cmd_tailscale,
-            "audio": cmd_audio, "backup": cmd_backup, "cameras": cmd_cameras}
+            "audio": cmd_audio, "backup": cmd_backup, "cameras": cmd_cameras, "display": cmd_display}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:

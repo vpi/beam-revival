@@ -48,6 +48,7 @@ tar -C "$PROJECT" -czf - --exclude=__pycache__ beamctl docs README.md -C image r
       sudo udevadm control --reload
       sudo systemctl restart beam-server
       sudo systemctl start beam-cameras || true
+      sudo systemctl restart beam-display || true
       sudo pkill -x cage || true          # robot screen restarts with the new page (getty logs in again)
       sleep 3
       systemctl is-active beam-server'
