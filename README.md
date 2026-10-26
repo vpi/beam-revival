@@ -16,7 +16,8 @@ Tested on a real Beam+ (October 2026), running from a USB stick, with the robot'
 
 - **Driving** from a browser on your laptop or phone: keyboard, on-screen joystick or gamepad, with
   a dead-man stop, E-STOP, and speed limits
-- **Live video** from the head and floor cameras (two-way audio is set up, but not yet confirmed on the real robot)
+- **Live video** from the head and floor cameras, and **two-way audio**: hear the room through the
+  robot's microphone, and talk through its speaker
 - **Charging** on the original dock, and **remote access** from anywhere through Tailscale, with
   nothing exposed to the internet
 - Experimental, so far only tried against the simulator: face recognition with spoken greetings, and AI
