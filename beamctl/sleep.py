@@ -65,37 +65,44 @@ class Backlight:
                 log.warning("can't set the screen backlight (%s): %s", self.dir, e)
                 self._warned = True
 
-    def off(self) -> None:
+    def _read(self, name: str) -> int | None:
+        try:
+            return int((self.dir / name).read_text())
+        except (OSError, ValueError):
+            return None
+
+    def _too_dark(self, value: int | None) -> bool:
+        # Under 10 %: not a brightness anyone picked for a robot's face. systemd-backlight restores at least
+        # 5 % at boot (e.g. 4 of 93) after a shutdown while asleep, which is how such values turn up.
+        top = self._read("max_brightness")
+        return value is not None and top is not None and value < top * 0.10
+
+    def off(self, remember: bool = True) -> None:
+        """remember=False: keep the brightness remembered from before (e.g. restarting while asleep)."""
         if self.dir is None:
             return
-        try:
-            current = int((self.dir / "brightness").read_text())
-            if current > 0:
-                self._saved = current
-        except (OSError, ValueError):
-            pass
+        current = self._read("brightness")
+        if remember and current and not self._too_dark(current):
+            self._saved = current
         self._write(0)
 
     def ensure_on(self) -> None:
-        """Awake but dark (e.g. the server was killed while asleep): light the screen again."""
+        """Awake but dark (the server died while asleep, or a boot after a shutdown while asleep)."""
         if self.dir is None:
             return
-        try:
-            dark = int((self.dir / "brightness").read_text()) == 0
-        except (OSError, ValueError):
-            return
-        if dark:
+        current = self._read("brightness")
+        if current == 0 or self._too_dark(current):
             self.on()
 
     def on(self) -> None:
         if self.dir is None:
             return
         value = self._saved
-        if not value:
-            try:
-                value = int(int((self.dir / "max_brightness").read_text()) * 0.75)
-            except (OSError, ValueError):
+        if not value or self._too_dark(value):
+            top = self._read("max_brightness")
+            if top is None:
                 return
+            value = int(top * 0.75)
         self._write(value)
 
 
@@ -139,7 +146,7 @@ class SleepManager:
         self.backlight._saved = s.get("backlight") or None
         if self.asleep:
             log.info("still asleep after a restart (%s)", self.reason)
-            self.backlight.off()
+            self.backlight.off(remember=False)       # the screen's brightness now isn't the one to restore
 
     def _save(self) -> None:
         if not self.state_file:

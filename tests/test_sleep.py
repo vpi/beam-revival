@@ -131,6 +131,29 @@ def test_awake_start_relights_a_dark_screen(tmp_path):
     assert (tmp_path / "brightness").read_text() == "12\n"
 
 
+def test_reboot_while_asleep_keeps_the_real_brightness(tmp_path):
+    # Seen on the robot: asleep at shutdown (brightness 0), systemd-backlight brings the screen up at its
+    # 5 % minimum (4 of 93), and waking restored that 4 instead of the 69 from before.
+    light = tmp_path / "bl"
+    light.mkdir()
+    (light / "max_brightness").write_text("93\n")
+    (light / "brightness").write_text("69\n")
+    state = str(tmp_path / "sleep.json")
+    SleepManager(None, Backlight(str(light)), state_file=state).sleep("someone")
+    (light / "brightness").write_text("4\n")                    # the reboot
+    after = SleepManager(None, Backlight(str(light)), state_file=state)
+    assert (light / "brightness").read_text() == "0"            # still asleep, still dark
+    after.wake("someone")
+    assert (light / "brightness").read_text() == "69"
+
+
+def test_awake_boot_at_minimum_brightness_is_relit(tmp_path):
+    (tmp_path / "max_brightness").write_text("93\n")
+    (tmp_path / "brightness").write_text("4\n")
+    SleepManager(None, Backlight(str(tmp_path)))
+    assert (tmp_path / "brightness").read_text() == "69"
+
+
 def test_sleep_is_remembered_across_restarts(tmp_path):
     state = str(tmp_path / "sleep.json")
     s = SleepManager("23:00-07:00", state_file=state)
