@@ -110,7 +110,7 @@ them in the file with `(saved on robot)`. To change Wi-Fi later, edit the file a
 ## 3. Boot the robot from the stick
 
 1. Robot off. Plug in the stick and the keyboard.
-2. Power on and tap the boot-menu key: usually **F11** or **F12** (some boards use **F7** or **Esc**).
+2. Power on and tap the boot-menu key: **F7** on our Beam+. If that does nothing, try **F11**, **F12** or **Esc**.
    Pick the USB stick. If no menu appears, **Del** opens the BIOS setup, where you can put USB first in the boot order.
 3. The stick boots in about 20–30 s. The screen shows the robot face and status:
 

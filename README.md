@@ -48,7 +48,7 @@ All in [docs/robot-usb.md](docs/robot-usb.md), step by step:
 2. **Write it to the USB stick**, with Rufus on Windows or `dd` on Linux.
 3. **Fill in `beam.conf`** on the stick (it shows up as a drive called BEAMCONFIG): your Wi-Fi,
    and optionally a Tailscale auth key and a lower top speed.
-4. **Boot the robot from the stick**, wheels off the ground. Use the boot-menu key, usually F11 or F12.
+4. **Boot the robot from the stick**, wheels off the ground. Tap the boot-menu key while it powers on: **F7** on our Beam+.
    The robot's screen shows a Tailscale login link (unless you gave an auth key), then the address
    to drive it from.
 5. **Drive.** Open that address, check the wheels turn the right way, then put it on the floor and
