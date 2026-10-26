@@ -10,6 +10,56 @@ whose cloud service is gone.
 > already own. Use at your own risk: a robot that moves can hurt people, pets and itself. Test with the
 > wheels off the ground, and never leave the AI driving unsupervised.
 
+## What works
+
+Tested on a real Beam+ (October 2026), running from a USB stick, with the robot's own disk untouched:
+
+- **Driving** from a browser on your laptop or phone: keyboard, on-screen joystick or gamepad, with
+  a dead-man stop, E-STOP, and speed limits
+- **Live video** from the head and floor cameras (two-way audio is set up, but not yet confirmed on the real robot)
+- **Charging** on the original dock, and **remote access** from anywhere through Tailscale, with
+  nothing exposed to the internet
+- Experimental, so far only tried against the simulator: face recognition with spoken greetings, and AI
+  driving ([docs/brain.md](docs/brain.md))
+
+Not tested: the BeamPro (it uses the same motor board protocol, so it may work).
+
+## Quick start
+
+### You need
+
+- A **Beam+** with a working battery. Ours was dead after years in storage; a standard 12 V 18 Ah
+  sealed lead-acid battery (ML18-12) replaced it.
+- A **USB stick**, 16 GB or more, and a **USB keyboard** (only to pick the boot device).
+- A **Linux machine** to build the image: Ubuntu 24.04+ or Debian 12+, real or a virtual machine,
+  with 15 GB free. Building takes about 20 minutes.
+- Your **Wi-Fi** name and password.
+- A free **[Tailscale](https://tailscale.com)** account, to drive from your devices over HTTPS
+  (recommended; plain home-network access is possible too).
+- Something to put the robot **on blocks**, so its wheels are off the ground for the first tests.
+
+### Steps
+
+All in [docs/robot-usb.md](docs/robot-usb.md), step by step:
+
+1. **Build the image** on the Linux machine: install a few packages, clone this repo, run
+   `sudo image/build-image.sh`.
+2. **Write it to the USB stick**, with Rufus on Windows or `dd` on Linux.
+3. **Fill in `beam.conf`** on the stick (it shows up as a drive called BEAMCONFIG): your Wi-Fi,
+   and optionally a Tailscale auth key and a lower top speed.
+4. **Boot the robot from the stick**, wheels off the ground. Use the boot-menu key, usually F11 or F12.
+   The robot's screen shows a Tailscale login link (unless you gave an auth key), then the address
+   to drive it from.
+5. **Drive.** Open that address, check the wheels turn the right way, then put it on the floor and
+   drive slowly.
+
+The robot's own software is untouched: take the stick out and it boots Beam's original system again.
+
+**No robot?** You can try the driving page against the simulator (see
+[Run it against the simulator](#run-it-against-the-simulator)).
+
+## What's in here
+
 | Part | What it does |
 |---|---|
 | `beamctl/protocol.py` | The motor board wire protocol: commands, status packets, STM32 CRC. Spec in [docs/motor-protocol.md](docs/motor-protocol.md). |
@@ -71,9 +121,6 @@ account (phone app, laptop). The serve setting persists across reboots, and `sud
 - Video goes peer-to-peer over Tailscale too. On networks that block direct connections,
   Tailscale relays it (DERP), which still works but adds some latency.
 
-**Dev VM:** `https://beam-dev.<your-tailnet>.ts.net/` serves the simulator setup. It runs with
-`--allow-remote-robot` so `/robot?test=1` can be opened from another machine. Don't use that flag on the robot.
-
 ## Run it against the simulator
 
 Needs Python 3.10+ and `aiohttp` (`sudo apt install python3-aiohttp`; for tests also `python3-pytest python3-pytest-asyncio`).
@@ -89,7 +136,7 @@ in place of the cameras. Logs are in `/tmp/beam-sim.log` and `/tmp/beam-server.l
 Simulator options (`python3 -m beamctl.sim --help`) can inject corrupted or dropped replies.
 
 ```bash
-python3 -m pytest -q        # 29 tests, ~20 s
+python3 -m pytest -q        # 65 tests, about a minute and a half
 ```
 
 ## Safety behaviour
@@ -103,20 +150,19 @@ python3 -m pytest -q        # 29 tests, ~20 s
 - **Power watchdog:** on opening the port the server immediately sends Beam's "power-cycle in 300 s" order and re-sends it every 5 s. Without this, the robot powers off about 5 minutes after you boot your own OS (see the spec, section 6).
 - **No authentication by default.** Use `--token SECRET` and open `http://robot:8080/?token=SECRET` for anything beyond your home LAN.
 
-## First session on the real robot (wheels off the ground)
+## Things that may surprise you on the real robot
 
-Use the USB stick. [docs/robot-usb.md](docs/robot-usb.md) walks through it step by step: building the
-image on any Linux machine (about 20 minutes), writing the stick, filling in `beam.conf` and booting
-the robot. The stick boots everything and backs up the internal disk automatically. Then:
+- **On blocks the wheels twitch,** and turns keep going for a second or two after you let go. The motor
+  board steers by its gyro, which can't work while the robot's body doesn't move. Judge only
+  directions on blocks; on the floor it drives and stops cleanly.
+- **Turns start slowly.** The board ramps up turning speed: hold the key rather than tapping it.
+- **If the motor board isn't connected, the robot powers itself off about 5 minutes after boot.**
+  That's the board's own watchdog, which our server normally keeps refreshing. Check the small USB
+  cable on the motor board in the base: lifting the robot's top can pull it loose.
+- **Cameras appear a few seconds after the screen.** They need their firmware loaded at every
+  power-on; the stick copies it from the robot's own disk the first time.
 
-1. Check the board is seen: the robot screen shouldn't say "Motor board not connected"
-   (or run `lsusb | grep 25a1:000b` over SSH).
-2. On blocks, drive gently. Check direction (forward = forward, left = left), stop behaviour,
-   and battery readings.
-3. Settle the **limiter tag** question (spec, section 7): compare `limited_linear` in
-   `/api/status` with the commanded speed under `--tag-mode board_time`, `zero` and `counter`
-   (edit `/etc/beam/server.env`, then `sudo systemctl restart beam-server`).
-4. Check that the head camera is the large picture on the driving page, and that sound works both ways.
+What we learned about the hardware is in [docs/motor-protocol.md](docs/motor-protocol.md), section 8.
 
 ## Third-party components
 

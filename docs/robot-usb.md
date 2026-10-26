@@ -98,10 +98,10 @@ Unplug and replug the stick. Windows shows a drive called **BEAMCONFIG**. Open `
 | `WIFI_SSID`, `WIFI_PASSWORD` | Your Wi-Fi (2.4 or 5 GHz). Required. |
 | `TAILSCALE_AUTHKEY` | Optional. Create one at login.tailscale.com → Settings → **Keys** → *Generate auth key* (one-off, pre-approved). Without it, the robot screen shows a login link to open on your phone instead. |
 | `ROBOT_NAME` | Its name on your tailnet. The default `beam` gives `https://beam.<your-tailnet>.ts.net/`. |
-| `MAX_SPEED` | Top speed in m/s (0.6 by default; the board's limit is 1.0). Start low. |
+| `MAX_SPEED` | Top speed in m/s (0.6 by default; the board's limit is 1.0). Start low: 0.3 suits a small home. |
 | `ACCESS_TOKEN` | Optional extra lock on top of Tailscale. |
 | `LAN_ACCESS` | `yes` also serves plain `http://<robot-ip>:8080` at home (no Talk there). |
-| `SSH_KEY` | Keys allowed to SSH in as `beam`. The image comes with the beam-revival project key, so Claude can help troubleshoot. **Delete that line if you don't want that.** |
+| `SSH_KEY` | Public keys allowed to SSH in as `beam` (one `SSH_KEY=` line each). Filled in with the key you gave `build-image.sh --ssh-key`. Without any key, SSH logins are impossible: there are no passwords. |
 
 On boot, the robot moves the Wi-Fi password and Tailscale key into its system and replaces
 them in the file with `(saved on robot)`. To change Wi-Fi later, edit the file again.
@@ -129,10 +129,14 @@ them in the file with `(saved on robot)`. To change Wi-Fi later, edit the file a
 
 ## 4. First drive (wheels off the ground)
 
-1. Open the robot's address and press **W** briefly. The wheels should turn forward. Check left and right.
+1. Open the robot's address and press **W** briefly. Both wheels should turn forward; check backward,
+   left and right too. **Only judge directions on blocks:** with the wheels in the air the board's gyro
+   steering can't work, so the wheels twitch, straight runs drift and turns keep going for a second or two
+   after you let go. That's normal and stops on the floor (see `docs/motor-protocol.md`, section 8).
 2. Check sound both ways. The robot's mic plays on your side, and **Talk** sends your voice
    (allow the microphone when the browser asks).
-3. Only then put it on the floor, at a low `MAX_SPEED`.
+3. Only then put it on the floor, at a low `MAX_SPEED`, in an open space, standing beside it. Turns start
+   slowly (the board ramps them), so hold the key.
 
 ## How it starts
 
