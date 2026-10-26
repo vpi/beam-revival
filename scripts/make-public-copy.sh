@@ -44,6 +44,14 @@ if [ -f "$SUBS" ]; then
   done < <(tr -d '\r' < "$SUBS")
 fi
 
+# Scripts must stay executable for people who clone the repo, but git on Windows doesn't see file modes.
+# Record the executable bit in the copy's git index for every tracked file starting with "#!".
+if [ -d "$DEST/.git" ]; then
+  git -C "$DEST" ls-files | while read -r f; do
+    [ "$(head -c2 "$DEST/$f" 2>/dev/null)" = "#!" ] && git -C "$DEST" update-index --chmod=+x -- "$f"
+  done
+fi
+
 echo "public copy: $DEST"
 echo "files: $(find "$DEST" -type f -not -path '*/.git/*' | wc -l)"
 echo "--- anything that still looks personal or secret (review before publishing):"

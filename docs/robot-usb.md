@@ -14,6 +14,56 @@ software again.
 - A USB stick of **16 GB or more**. A fast one helps, since the system runs from it.
 - A **USB keyboard**, only to pick the boot device. A small USB hub helps if the robot has one free port.
 - The robot **charged**, and **on blocks or with its wheels off the ground** for the first boot.
+- To build the image: a **64-bit Linux machine** (section 0).
+
+## 0. Build the image
+
+There's no ready-made download yet: you build the image yourself. It's one script, and it takes 15–30 minutes.
+
+**You need** a 64-bit PC or virtual machine with **Ubuntu 24.04 or newer, or Debian 12 or newer**, with
+`sudo`, an internet connection and **15 GB of free disk space**. A VirtualBox, VMware or Hyper-V VM works.
+The script builds the robot's system from official Debian packages: nothing on your machine changes
+apart from the packages in step 1 and the files in `/var/tmp`.
+
+1. Install the tools:
+   ```bash
+   sudo apt update
+   sudo apt install -y git debootstrap debian-archive-keyring parted dosfstools e2fsprogs xz-utils curl
+   ```
+
+2. Get the code:
+   ```bash
+   git clone https://github.com/vpi/beam-revival.git
+   cd beam-revival
+   ```
+
+3. Optional, but recommended: an **SSH key**, so you can log in to the robot later for maintenance.
+   If `ls ~/.ssh/id_ed25519.pub` shows nothing, make one (press Enter at each question):
+   ```bash
+   ssh-keygen -t ed25519
+   ```
+   You can also add a key later in `beam.conf` (section 2).
+
+4. Build:
+   ```bash
+   sudo image/build-image.sh --ssh-key ~/.ssh/id_ed25519.pub
+   ```
+   Leave out `--ssh-key …` if you skipped step 3. It prints a few `===` steps and ends with `done`.
+   The result is **`/var/tmp/beam-usb-stable.img`** plus a compressed copy, **`/var/tmp/beam-usb-stable.img.xz`**
+   (about 1.2 GB). If a step fails, its details are in `/var/tmp/beam-debootstrap.log` or `/var/tmp/beam-apt.log`.
+
+5. Copy `beam-usb-stable.img.xz` to the computer you'll write the stick with (a shared folder, a USB
+   drive, or `scp`), and continue with section 1.
+
+   Or write the stick right here on Linux. Plug it in and find it with `lsblk` (check the size: **this
+   erases the device you name**), then:
+   ```bash
+   sudo dd if=/var/tmp/beam-usb-stable.img of=/dev/sdX bs=4M status=progress conv=fsync
+   ```
+
+To update an image you already built with newer code, `sudo image/update-image.sh /var/tmp/beam-usb-stable.img`
+takes seconds instead of a full rebuild. To try an image without a robot, `sudo image/test-boot.sh bios`
+boots it in QEMU (needs the `qemu-system-x86` and `ovmf` packages).
 
 ## 1. Write the image
 

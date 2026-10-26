@@ -105,8 +105,9 @@ python3 -m pytest -q        # 29 tests, ~20 s
 
 ## First session on the real robot (wheels off the ground)
 
-Use the USB stick ([docs/robot-usb.md](docs/robot-usb.md)). It boots everything and backs up the
-internal disk automatically. Then:
+Use the USB stick. [docs/robot-usb.md](docs/robot-usb.md) walks through it step by step: building the
+image on any Linux machine (about 20 minutes), writing the stick, filling in `beam.conf` and booting
+the robot. The stick boots everything and backs up the internal disk automatically. Then:
 
 1. Check the board is seen: the robot screen shouldn't say "Motor board not connected"
    (or run `lsusb | grep 25a1:000b` over SSH).

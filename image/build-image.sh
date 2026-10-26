@@ -7,7 +7,7 @@
 # Variants: "stable" (default; robot name "beam") and "lab" (robot name "beam-lab", brain key
 # pre-filled, separate output file) so the two sticks can live side by side on one tailnet.
 #
-# Produces <out> and <out>.xz. Write it to a 16 GB+ USB stick with balenaEtcher or Rufus.
+# Produces <out> and <out>.xz. Write it to a 16 GB+ USB stick with Rufus (see docs/robot-usb.md).
 # Layout (MBR, so old BIOSes boot it):
 #   p1  FAT32 "BEAMCONFIG"  512 MiB  beam.conf (editable on Windows/macOS) + UEFI boot files
 #   p2  ext4  "beamroot"    rest     the system; grown to fill the stick on first boot
