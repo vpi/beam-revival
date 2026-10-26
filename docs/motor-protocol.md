@@ -76,7 +76,7 @@ def crc(buf: bytes) -> int:          # len(buf) % 4 == 0
 | `0x0F` | power cycle / off | 0 | delay (s) | type: 0 = cycle, 1 = off until charging, 2 = off | a new one **replaces** any pending one **[confirmed]** |
 | `0x10` | get status | 0 → `CCCC3333`, `0x10000` → `CCCC4444` | 0 | 0 | **[confirmed]** |
 | `0x14` | get dock id | 0 | 0 | 0 | 64-byte reply **[confirmed]** |
-| `0x19` | charging LED colour | 0 | colour & 0xFFFF | 0 | **[confirmed]** |
+| `0x19` | charging LED colour | 0 | colour & 0xFFFF | 0 | the light at the bottom of the Beam+. 0 = off, `0x0F00` = the green it shows while charging, `0xFFFF` = light blue, 1–4 = blue. **Not** RGB565 (`0x07E0` is light blue) **[tested]** |
 
 The library also sends battery calibration, RAM reads and serial-number commands. We don't need them, and their codes are in the decompiled sources on the VM.
 

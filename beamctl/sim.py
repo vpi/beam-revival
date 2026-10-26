@@ -98,6 +98,7 @@ class SimulatedBoard:
         self.capacity = 80.0
         self.tag = 0
         self.timed_out = True
+        self.light: int | None = None     # last base light colour set (None = never)
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -207,8 +208,10 @@ class SimulatedBoard:
             self.stats.power_commands.append((self.now(), delay, kind))
             # A new power command replaces any pending one.
             self._pending_power = PowerEvent(self.now() + delay / self.time_scale, kind)
-        elif cmd.code in (p.CMD_GYRO_MODE, p.CMD_CHARGING_COLOR):
-            pass                          # fire-and-forget on the real board too
+        elif cmd.code == p.CMD_CHARGING_COLOR:
+            self.light = cmd.a & 0xFFFF   # the base light; fire-and-forget on the real board too
+        elif cmd.code == p.CMD_GYRO_MODE:
+            pass
         else:
             log.warning("unknown command code %#x", cmd.code)
 

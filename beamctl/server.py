@@ -20,8 +20,10 @@ import asyncio
 import json
 import logging
 import math
+import os
 import secrets
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from aiohttp import WSMsgType, web
 from . import protocol as p
 from .serialport import SerialPort
 from .signaling import MediaHub
+from .sleep import Backlight, SleepManager
 
 log = logging.getLogger("beam.server")
 WEB_DIR = Path(__file__).parent / "web"
@@ -59,6 +62,14 @@ class Config:
     brain_fps: float = 3.0              # camera frames per second sent to the brain
     # Written by the robot image's setup scripts (Tailscale login link, addresses); shown on the robot screen.
     setup_file: str = "/run/beam/setup.json"
+    # Sleep mode (beamctl/sleep.py): nightly window like "23:00-07:00" in local time, and the screen backlight
+    # to switch off ("auto" = the first one in /sys/class/backlight; None = leave the screen alone).
+    sleep_hours: str | None = None
+    backlight: str | None = None
+    sleep_state: str | None = None             # file that remembers sleep across restarts
+    # The light in the base that shows charging: the board's "charging colour" (command 0x19), set on connect.
+    # 0x0F00 is the green Beam showed (the board's colour values aren't plain RGB); 0 turns it off.
+    light_color: int = 0x0F00
 
 
 PRIORITY_BRAIN = 0          # autonomy: drives only while no human is driving
@@ -100,6 +111,8 @@ class MotorController:
         self._counter = 0
         self._task: asyncio.Task | None = None
         self._stopping = False
+        self._light_pending = True               # (re)send the charging light colour at the next cycle
+        self.sleep = SleepManager(cfg.sleep_hours, Backlight(cfg.backlight), cfg.sleep_state)
 
     # --- driver input ----------------------------------------------------------
 
@@ -109,6 +122,8 @@ class MotorController:
         A higher-priority client (a human) takes over immediately from a lower one (the brain);
         between equals, whoever is actively driving keeps control until their dead-man lapses.
         """
+        if self.sleep.asleep:
+            return False
         now = time.monotonic()
         d = self.drive
         active = d.owner is not None and d.owner is not owner and now - d.last_input < self.cfg.deadman_s
@@ -135,6 +150,14 @@ class MotorController:
             log.warning("E-STOP engaged")
         else:
             log.info("E-stop released")
+
+    def go_to_sleep(self, reason: str) -> None:
+        self.drive.owner = None
+        self.drive.target_linear = self.drive.target_angular = 0.0
+        self.sleep.sleep(reason)
+
+    def wake_up(self, reason: str) -> None:
+        self.sleep.wake(reason)
 
     def _effective_target(self, now: float) -> tuple[float, float]:
         d = self.drive
@@ -202,6 +225,7 @@ class MotorController:
         self._drain_replies()
         self._send_watchdog()                          # first thing, always
         self._send(p.gyro_mode(self.cfg.gyro_mode))
+        self._light_pending = True                     # a reconnected board may have reset its light
         return True
 
     async def _cycle(self) -> None:
@@ -216,6 +240,8 @@ class MotorController:
         lin = _ramp(link.commanded_linear, tgt_lin, cfg.linear_accel * dt, cfg.linear_decel * dt)
         ang = _ramp(link.commanded_angular, tgt_ang, cfg.angular_accel * dt, cfg.angular_accel * dt)
 
+        if self._light_pending and self._send(p.charging_color(cfg.light_color)):
+            self._light_pending = False
         self._drain_replies()                          # Beam flushes input before every command
         if self._send(p.velocity(lin, ang, self._tag())):
             link.commanded_linear, link.commanded_angular = lin, ang
@@ -296,6 +322,7 @@ class MotorController:
                 "max_angular": self.cfg.max_angular,
             },
             "board": link.status.to_dict() if link.status else None,
+            "sleep": self.sleep.snapshot(),
         }
 
 
@@ -446,7 +473,8 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                         ok = ctrl.set_target(float(m.get("linear", 0)), float(m.get("angular", 0)), me,
                                              priority=PRIORITY_BRAIN)
                         if not ok:
-                            await ws.send_json({"type": "denied", "reason": "a person is driving"})
+                            await ws.send_json({"type": "denied", "reason": "the robot is asleep" if ctrl.sleep.asleep
+                                                else "a person is driving"})
                     elif m.get("type") == "stop":
                         ctrl.release(me)
                     else:
@@ -497,9 +525,14 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                     if kind == "drive":
                         ok = ctrl.set_target(float(m.get("linear", 0)), float(m.get("angular", 0)), me)
                         if not ok:
-                            await ws.send_json({"type": "denied", "reason": "another driver has control"})
+                            await ws.send_json({"type": "denied", "reason": "the robot is asleep" if ctrl.sleep.asleep
+                                                else "another driver has control"})
                     elif kind == "stop":
                         ctrl.set_target(0.0, 0.0, me)
+                    elif kind == "sleep":
+                        ctrl.go_to_sleep(who or "a driver")
+                    elif kind == "wake":
+                        ctrl.wake_up(who or "a driver")
                     elif kind == "estop":
                         ctrl.set_estop(True)
                     elif kind == "release_estop":
@@ -551,10 +584,21 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
             app.router.add_get("/test/map.png", proxy("/map.png"))
             app.router.add_get("/test/pose", proxy("/pose"))
 
+    async def sleep_schedule() -> None:
+        while True:
+            # "Busy" = someone drove in the last minute: the night waits until they're done.
+            ctrl.sleep.tick(datetime.now(), busy=time.monotonic() - ctrl.drive.last_input < 60)
+            await asyncio.sleep(10)
+
+    tasks: list[asyncio.Task] = []
+
     async def on_startup(app: web.Application) -> None:
         ctrl.start()
+        tasks.append(asyncio.create_task(sleep_schedule(), name="sleep-schedule"))
 
     async def on_cleanup(app: web.Application) -> None:
+        for t in tasks:
+            t.cancel()
         await ctrl.stop()
 
     app.on_startup.append(on_startup)
@@ -576,6 +620,15 @@ def main() -> None:
     ap.add_argument("--tls-cert", help="serve HTTPS (needed for the pilot's microphone); see scripts/make-cert.sh")
     ap.add_argument("--tls-key")
     ap.add_argument("--brain-key", help="enable the brain connection (face recognition etc.) with this shared key")
+    ap.add_argument("--sleep-hours", help="sleep every night in this local-time window, e.g. 23:00-07:00")
+    ap.add_argument("--backlight", default="auto",
+                    help="screen backlight to switch off in sleep mode: a /sys/class/backlight/<name> path, "
+                         "'auto' (default) or 'none'")
+    ap.add_argument("--light-color", type=lambda s: int(s, 0), default=Config.light_color,
+                    help="charging light colour, as the board understands it (default 0x0F00 = green; 0 = off)")
+    # systemd's StateDirectory= sets $STATE_DIRECTORY: remember sleep there across restarts.
+    ap.add_argument("--sleep-state", default=os.path.join(os.environ["STATE_DIRECTORY"], "sleep.json")
+                    if os.environ.get("STATE_DIRECTORY") else None, help=argparse.SUPPRESS)
     ap.add_argument("--world-url", help=argparse.SUPPRESS)       # dev: simulator's virtual-world endpoint
     ap.add_argument("--allow-remote-robot", action="store_true",
                     help="development only: accept the robot media page from another machine")
@@ -585,7 +638,9 @@ def main() -> None:
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = Config(device=args.device, max_linear=min(args.max_linear, 1.0), max_angular=args.max_angular,
                  deadman_s=args.deadman, tag_mode=args.tag_mode, token=args.token, setup_file=args.setup_file,
-                 brain_key=args.brain_key)
+                 brain_key=args.brain_key, sleep_hours=args.sleep_hours,
+                 backlight=None if args.backlight == "none" else args.backlight,
+                 light_color=args.light_color, sleep_state=args.sleep_state)
     if cfg.token is None:
         log.warning("no --token set: anyone on this network can drive the robot")
     ssl_ctx = None

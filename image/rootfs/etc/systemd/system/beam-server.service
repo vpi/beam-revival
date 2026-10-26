@@ -9,6 +9,8 @@ Wants=beam-config.service
 User=beamsrv
 Group=beamsrv
 SupplementaryGroups=dialout
+# /var/lib/beam-server: remembers sleep mode across restarts ($STATE_DIRECTORY)
+StateDirectory=beam-server
 EnvironmentFile=-/etc/beam/server.env
 WorkingDirectory=/opt/beam-revival
 ExecStart=/usr/bin/python3 -m beamctl.server --device /dev/beam-motor --port 8080 $BEAM_ARGS

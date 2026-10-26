@@ -6,3 +6,5 @@ SUBSYSTEM=="video4linux", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0006", SYM
 SUBSYSTEM=="video4linux", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0007", SYMLINK+="video-nav"
 # Cameras still in their bootloader (no firmware yet): load it. Runs at boot and after any camera reset.
 ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="25a1", ATTR{idProduct}=="4006|4007", TAG+="systemd", ENV{SYSTEMD_WANTS}+="beam-cameras.service"
+# Screen backlight: the motor server (user beamsrv) turns it off in sleep mode
+ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp beamsrv /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/brightness"

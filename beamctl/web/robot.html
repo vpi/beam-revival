@@ -48,6 +48,9 @@
   .ai-banner small { display: block; font-size: 2.4vmin; font-weight: 500; opacity: .9; }
   .ai-banner.on { display: block; }
   body.ai-active .eye { background: var(--ai); }
+  /* Sleep mode: nothing on screen (the backlight is off too), cameras and microphone closed. */
+  .sleep { position: fixed; inset: 0; background: #000; z-index: 10; display: none; }
+  body.asleep .sleep { display: block; }
 </style>
 </head>
 <body>
@@ -67,6 +70,7 @@
   <div id="error" class="error"></div>
   <div id="setup" class="setup"></div>
   <button id="sound" class="sound">Enable sound</button>
+  <div class="sleep"></div>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -79,6 +83,7 @@
 
   const peers = new Map();                     // pilot id -> { pc, audio }
   let ws = null, media = null;
+  let asleep = false;
 
   // ---------- local media ----------
   async function getMedia() {
@@ -241,6 +246,7 @@
         $("subtitle").textContent = "Another robot screen is in charge";
         return;
       }
+      if (asleep) return;                      // we closed it ourselves: no driving while asleep
       $("srvDot").className = "dot bad"; $("srvText").textContent = "server offline";
       setTimeout(connect, 1000);
     };
@@ -348,6 +354,9 @@
       const b = s.board;
       $("battery").textContent = b && b.battery_percent != null ? `battery ${b.battery_percent.toFixed(0)}%${b.charging ? " · charging" : ""}` : "";
       renderSetup(s.setup, s.link);
+      const sleeping = !!(s.sleep && s.sleep.asleep);
+      if (sleeping && !asleep) enterSleep();
+      else if (!sleeping && asleep) location.reload();   // woken: start fresh, cameras and all
     } catch (e) { /* server restarting */ }
   }
 
@@ -375,10 +384,26 @@
     return { id, connection: p.pc.connectionState, ice: p.pc.iceConnectionState, audioBytesIn };
   }));
 
+  // ---------- sleep mode ----------
+  // Close the cameras and microphone (not just hide them), drop every call, and go black. The server turns
+  // the backlight off and refuses driving. Waking reloads the page.
+  function enterSleep() {
+    asleep = true;
+    document.body.classList.add("asleep");
+    setFrameRate(0);
+    for (const id of [...peers.keys()]) closePeer(id);
+    if (ws) ws.close();
+    for (const s of [media && media.head, media && media.nav]) if (s) s.getTracks().forEach((t) => t.stop());
+    media = null;
+    $("self").srcObject = null;
+    navVideo.srcObject = null;
+  }
+
   function showError(text) { const e = $("error"); e.textContent = text; e.style.display = "block"; }
 
   (async () => {
-    pollBattery(); setInterval(pollBattery, 3000);   // setup notes must show even if the cameras fail
+    await pollBattery(); setInterval(pollBattery, 3000);   // setup notes must show even if the cameras fail
+    if (asleep) return;                        // started while asleep: don't open the cameras at all
     try {
       media = await getMedia();
       $("self").srcObject = media.head;
@@ -386,7 +411,7 @@
       showError("Camera/microphone unavailable: " + e.message);
       $("title").textContent = "Camera not found";
       $("subtitle").textContent = "Retrying in 10 seconds";
-      setTimeout(() => location.reload(), 10000);    // cameras appear a few seconds after their firmware loads
+      setTimeout(() => { if (!asleep) location.reload(); }, 10000);   // cameras appear a few seconds after their firmware loads
       return;
     }
     render();

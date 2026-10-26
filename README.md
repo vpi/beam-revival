@@ -20,6 +20,8 @@ Tested on a real Beam+ (October 2026), running from a USB stick, with the robot'
   robot's microphone, and talk through its speaker
 - **Charging** on the original dock, and **remote access** from anywhere through Tailscale, with
   nothing exposed to the internet
+- **Sleep mode**, by button or on a nightly schedule: cameras, microphone and screen off, and woken
+  remotely from the driving page
 - Experimental, so far only tried against the simulator: face recognition with spoken greetings, and AI
   driving ([docs/brain.md](docs/brain.md))
 
@@ -170,6 +172,8 @@ python3 -m pytest -q        # 65 tests, about a minute and a half
   cable on the motor board in the base: lifting the robot's top can pull it loose.
 - **Cameras appear a few seconds after the screen.** They need their firmware loaded at every
   power-on; the stick copies it from the robot's own disk the first time.
+- **The two lights beside the floor camera are always on** while the robot is on, sleep mode
+  included. They're wired to its power; no software switch for them has turned up.
 
 What we learned about the hardware is in [docs/motor-protocol.md](docs/motor-protocol.md), section 8.
 

@@ -145,6 +145,20 @@ def cmd_config() -> None:
         speed = 0.6
     host = "0.0.0.0" if conf.get("LAN_ACCESS", "no").lower() in ("yes", "true", "1") else "127.0.0.1"
     args = f"--host {host} --max-linear {speed}" + (f" --token {token}" if token else "")
+    sleep_hours = conf.get("SLEEP_HOURS", "").replace(" ", "")
+    if sleep_hours:
+        if re.fullmatch(r"\d{1,2}:\d{2}-\d{1,2}:\d{2}", sleep_hours):
+            args += f" --sleep-hours {sleep_hours}"
+        else:
+            messages.append("SLEEP_HOURS must look like 23:00-07:00")
+    tz = conf.get("TIMEZONE", "") or "UTC"
+    tz_changed = False
+    if re.fullmatch(r"[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*", tz) and Path("/usr/share/zoneinfo", tz).is_file():
+        if Path("/etc/localtime").resolve() != Path("/usr/share/zoneinfo", tz).resolve():
+            run("timedatectl", "set-timezone", tz, check=False)
+            tz_changed = True                   # the server reads the zone at start: restart it
+    else:
+        messages.append(f"Unknown TIMEZONE {tz!r}: use a name like America/Vancouver")
     brain_key = conf.get("BRAIN_KEY", "")
     if brain_key:
         if re.fullmatch(r"[A-Za-z0-9_-]{16,128}", brain_key):
@@ -157,7 +171,7 @@ def cmd_config() -> None:
     SERVER_ENV.write_text(new)
     SERVER_ENV.chmod(0o640)
     KIOSK_URL.write_text("http://localhost:8080/robot" + (f"?token={token}" if token else "") + "\n")
-    if old and old != new:
+    if old and (old != new or tz_changed):
         # --no-block: beam-server is ordered After= this unit, so waiting here would deadlock.
         run("systemctl", "--no-block", "try-restart", "beam-server.service", check=False)
 

@@ -64,6 +64,13 @@
   .person img { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; background: var(--line); }
   .person .who { flex: 1; min-width: 0; }
   .person .who small { display: block; color: var(--muted); }
+  /* Sleep mode: covers the video while the robot sleeps (cameras, mic and screen off on the robot). */
+  .sleepov { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center;
+             gap: 10px; background: #0b0e12; color: #c7cdd5; z-index: 7; text-align: center; padding: 16px; }
+  .sleepov.show { display: flex; }
+  .sleepov strong { font-size: 18px; }
+  .wakebtn { border: 0; border-radius: 8px; padding: 10px 22px; font: inherit; font-weight: 700; background: var(--accent);
+             color: #fff; cursor: pointer; }
   .linkbtn { border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: 6px;
              padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
   .hiddenCard { display: none; }
@@ -142,6 +149,11 @@
       <button id="soundBtn" class="vbtn hidden">🔇 Enable sound</button>
       <button id="talkBtn" class="vbtn" disabled title="Microphone">🎤 Talk</button>
     </div>
+    <div id="sleepOv" class="sleepov">
+      <strong>🌙 Beam is asleep</strong>
+      <span id="sleepText">Cameras, microphone and screen are off.</span>
+      <button id="wakeBtn" class="wakebtn">Wake up</button>
+    </div>
     <div id="banner" class="banner"></div>
   </section>
   <aside>
@@ -164,6 +176,8 @@
       <div class="row"><span>Turn rate</span><span class="num" id="turn">—</span></div>
       <div class="row"><span>Heading</span><span class="num" id="yaw">—</span></div>
       <div class="row"><span>Motors</span><span id="motors">—</span></div>
+      <div class="row"><span>Mode</span><span id="sleepState">—</span></div>
+      <button class="linkbtn" id="sleepBtn" title="Cameras, microphone, screen off until woken from this page">🌙 Put to sleep</button>
     </div>
 
     <div class="card hiddenCard" id="aiCard">
@@ -218,7 +232,7 @@
     ws.onmessage = (ev) => {
       const m = JSON.parse(ev.data);
       if (m.type === "status") render(m);
-      else if (m.type === "denied") flash("Another driver has control", "warn");
+      else if (m.type === "denied") flash(m.reason ? m.reason[0].toUpperCase() + m.reason.slice(1) : "Another driver has control", "warn");
       else if (m.type === "rtc") onRtc(m.data);
       else if (m.type === "robot_online") rtcHello();
       else if (m.type === "rtc_unavailable") closeRtc("The robot's camera page isn't running");
@@ -480,6 +494,21 @@
   }
   $("estop").addEventListener("click", () => setEstop(!estop));
 
+  // ---------- sleep mode ----------
+  $("wakeBtn").addEventListener("click", () => { send({ type: "wake" }); $("sleepText").textContent = "Waking up…"; });
+  $("sleepBtn").addEventListener("click", () => {
+    if (confirm("Put Beam to sleep? Its cameras, microphone and screen turn off until someone wakes it from this page."))
+      send({ type: "sleep" });
+  });
+  function renderSleep(S) {
+    S = S || {};
+    $("sleepOv").classList.toggle("show", !!S.asleep);
+    $("sleepBtn").disabled = !!S.asleep;
+    $("sleepState").textContent = S.asleep ? "asleep" + (S.reason === "schedule" ? " (night schedule)" : "")
+      : "awake" + (S.schedule ? " · sleeps " + S.schedule : "");
+    if (!S.asleep) $("sleepText").textContent = "Cameras, microphone and screen are off.";
+  }
+
   // ---------- telemetry ----------
   function setLink(ok, text) {
     $("linkDot").className = "dot " + (ok ? "ok" : "bad");
@@ -507,6 +536,7 @@
     else if (!L.connected) setLink(false, "motor board offline");
     else setLink(true);
 
+    renderSleep(m.sleep);
     estop = D.estop;
     const st = $("estop");
     st.textContent = D.estop ? "STOPPED · tap to release" : "STOP";
