@@ -17,6 +17,9 @@ find "$MNT/opt/beam-revival" -name __pycache__ -prune -exec rm -rf {} +
 chroot "$MNT" python3 -m compileall -q /opt/beam-revival/beamctl
 cp -r "$HERE/rootfs/." "$MNT/"
 chmod 755 "$MNT/usr/local/sbin/beam-setup" "$MNT/usr/local/bin/beam-kiosk"
+for unit in "$HERE"/rootfs/etc/systemd/system/beam-*.service; do      # units added since the build
+  chroot "$MNT" systemctl enable -q "$(basename "$unit")"
+done
 umount "$MNT"
 rm -f "$IMG.xz"
 xz -T0 -6 -k "$IMG"

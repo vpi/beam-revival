@@ -185,8 +185,21 @@ async def test_status_endpoint_and_token(rig):
     assert 0 < body["board"]["battery_percent"] <= 100
 
 
-async def test_board_time_tag_is_echoed(rig):
+async def test_limiter_clock_is_echoed_as_tag(rig):
     board, ctrl, client = await rig()
     await asyncio.sleep(0.3)
-    # tag_mode=board_time sends back the board clock from the previous status.
+    # The default tag is the board's limiter clock from the previous status, so it's never stale.
     assert board.stats.last_tag > 0
+    assert 0 <= board.limiter_clock() - board.stats.last_tag < (200 << 32)
+    assert not board.timed_out
+
+
+async def test_board_ignores_stale_tags(rig):
+    # The real board drives only when the tag is a recent limiter clock value. board_time was our
+    # first guess, and the Beam+ ignored every command with it.
+    board, ctrl, client = await rig(tag_mode="board_time")
+    ws = await client.ws_connect("/ws")
+    await drive(ws, 0.4, 0.0, 0.8)
+    assert board.timed_out
+    assert board.cmd_linear == 0.0 and board.x == pytest.approx(0.0, abs=1e-3)
+    await ws.close()

@@ -7,7 +7,8 @@ Reverse-engineered from Beam software 2.22.14 (live-disk build, Sep 2021):
 - `st001_power_control`: the power/watchdog helper
 
 Decompiled with Ghidra 12.1.4 through REA on the analysis VM (`~/beam/re/`).
-Each item is marked **[confirmed]** (read straight from the code) or **[hypothesis]** (to verify on the robot).
+Each item is marked **[confirmed]** (read straight from the code), **[tested]** (seen on a real Beam+, Oct 2026)
+or **[hypothesis]** (still to verify). Section 8 has what the real robot taught us.
 
 ## 1. Device
 
@@ -70,7 +71,7 @@ def crc(buf: bytes) -> int:          # len(buf) % 4 == 0
 
 | Code | Name | arg0 | a | b | Notes |
 |---|---|---|---|---|---|
-| `0x00` | velocity | driving mode (default **1**) | linear × 65536 | angular × 65536 | + limiter tag at offset 20; reply is a status packet **[confirmed]** |
+| `0x00` | velocity | driving mode: **always 1** (see §8) | linear × 65536 | angular × 65536 | tag at offset 20 = the board's latest limiter clock (status offset 84), or the board ignores the speeds; reply is a status packet **[tested]** |
 | `0x0D` | set gyro mode | 0 | 1/0 | 0 | default **on** **[confirmed]** |
 | `0x0F` | power cycle / off | 0 | delay (s) | type: 0 = cycle, 1 = off until charging, 2 = off | a new one **replaces** any pending one **[confirmed]** |
 | `0x10` | get status | 0 → `CCCC3333`, `0x10000` → `CCCC4444` | 0 | 0 | **[confirmed]** |
@@ -86,7 +87,7 @@ Field names come from the library's own debug printer (`operator<<(_statStruct)`
 | Off | Type | Field | Scaling to SI |
 |---|---|---|---|
 | 0 | u32 | magic | |
-| 4 | u32 | flags | bit0 `m_en` motors enabled, bit1 `b_en` battery enabled, bit22 `cing` charging, bit23 `cdet` charger detected, bits 24–31 fault code |
+| 4 | u32 | flags | names from `inFlagsToString`: bit0 ENABLED, bit1 BRAKE_DISABLE, bit16 TIMEOUT, bit17 BUTTON, bit20 RRQ, bit22 CHARGING, bit23 CHARGE (charger detected), bit25 TEMP, bit26 GYRO, bit27 SPI, bit28 DRIVE, bit29 OV, bit30 UV, bit31 OC (bits 24–31 are also the fault code). Our Beam+ always shows ENABLED + TIMEOUT, also while driving fine **[tested]** |
 | 8, 12 | i32 | speed L, R | raw encoder speed |
 | 16, 20 | i32 | current L, R | × 0.0007947286 → A |
 | 24 | i32 | temperature | raw |
@@ -98,9 +99,9 @@ Field names come from the library's own debug printer (`operator<<(_statStruct)`
 | 56, 60 | i32 | rotation | raw (gyro) |
 | 64 | fixed | capacity | /65536 |
 | 68 | u32 | timeStamp | board clock, µs (per rosbeam) |
-| 72, 76 | i32 | encoder L, R (position) | lin = (L − R) × 0.0040578907, ang = −(L + R) × 0.019415744. The driver **aborts** if \|count\| > 0x7F000000 |
+| 72, 76 | i32 | encoder L, R (position). L = left wheel, R = right (seen from behind); the motors are mirrored, so forward is + on L and − on R **[tested]** | lin = (L − R) × 0.0040578907, ang = −(L + R) × 0.019415744. The driver **aborts** if \|count\| > 0x7F000000 |
 | 80 | fixed | capacityMax | /65536 |
-| 84 | u64 | velocityLimiterTag | echo of the last command's tag |
+| 84 | u64 | velocityLimiterTag | **not an echo**: the board's limiter clock, ~2000 counts per second in the upper 32 bits (about 730 million on ours). Send it back as the velocity tag **[tested]** |
 | 92 | fixed | actualLinearVelocity | m/s |
 | 96 | fixed | actualAngularVelocity | rad/s |
 | 100 | fixed | limitedLinearVelocity | m/s, what the board actually allows |
@@ -142,9 +143,60 @@ Beam keeps sending **power-cycle in 300 s** (code `0x0F`, a = 300, b = 0) every 
 
 **What this means for us:** when we boot our own Linux on the robot, the old software's last refresh is still pending, so **the base will cut power about 5 minutes later** unless our software keeps refreshing it. Our motor server must send `0x0F, a = 300, b = 0` every 5 s, starting immediately. Sending `power-off` (b = 2) with a short delay is also the clean way to shut the robot down.
 
-## 7. Open questions (to check on the robot)
+## 7. Open questions
 
-1. **Limiter tag semantics [hypothesis].** The tag comes from the remote pilot's drive request, the board echoes it in the status, and it reports `drivingCommandLatency` / `limiterLatency`. The likely design: the pilot stamps each command with the board `timeStamp` it last saw, the board measures round-trip latency from it, and it scales the allowed speed down when latency is high. Test plan: send commands with tag = 0, a constant, and the latest status `timeStamp`, then compare `limitedLinearVelocity` with the commanded value, wheels off the ground.
-2. Exact meaning of the fault byte and of `driving_mode` values other than 1.
-3. Whether the board needs any initialisation (gyro mode, LED colour) before it accepts motion, or whether `m_en` turns on by itself.
-4. Dock-id and controller-status packet layouts (only needed for auto-docking).
+1. **How the limiter scales speed.** The board drives only with a fresh limiter-clock tag (§8), but it reports
+   0 in the limit, limited-velocity and latency fields (offsets 100–118), even while driving. How stale a tag
+   may be, and whether a stale-ish one slows the robot rather than stopping it, is unknown.
+2. **The "actual velocity" fields (92, 96)** don't match the encoders: on blocks, turns showed up as linear
+   speed and angular read 0. Use the encoders until this is understood.
+3. Meaning of the fault byte, and of the TIMEOUT flag (always set on our Beam+).
+4. Dock-id and controller-status layouts (only needed for auto-docking). The controller status
+   (`0xCCCC4444`) has, per the library's printer: sensors, slip, `l_cmd`/`a_cmd`, linear and angular PID terms
+   (p, i, d, ff, out), linear/angular limits (odo, lim, sd, cd) and a `ttl`.
+5. Whether the board can be told to release the motors when idle (see the jitter in §8).
+
+## 8. Tested on a real Beam+ (Oct 2026)
+
+**Driving needs the limiter-clock tag [tested].** With any other tag (0, a counter, the `timeStamp` µs clock,
+or variants of it) the board ignores velocity commands completely: no encoder movement at up to 0.5 m/s.
+Echoing the latest status's `velocityLimiterTag` (offset 84) as the command tag makes both wheels drive.
+That's how Beam's remote pilot did it: it echoed the value, so the board could tell how old a command was.
+
+**Only use driving mode 1 [tested].** Mode 0 does nothing. Modes 2 and 3 do something else: a short
+command made **one wheel spin on its own for ~3 s at a fixed speed**, a different wheel on different runs,
+then stop by itself. It looks like a gyro-steered "turn by angle" that never completes on blocks. Even
+`DrivingListener` only ever sends mode 1 (it sends code `0x03` to switch the motors off in even modes).
+
+**Wheels and directions [tested].** Status/encoder "L" is the left wheel and "R" the right, seen from behind
+(screen = front). The motors are mirrored: forward is + counts on L, − on R. This matches the library's
+`lin = (L − R) × k`.
+
+**The motor controller sleeps until the first fresh command [tested].** After a full power-off (battery out)
+the board reports exactly 0 currents and speeds and the wheels are still. After the first accepted
+command, it actively holds the wheels at the commanded speed. With the wheels in the air that hold loop
+"hunts": the wheels twitch back and forth and currents swing up to ~±9000 raw. Expected to settle under
+the robot's weight on the floor (not yet tested).
+
+**Don't experiment with odd commands while it drives [tested].** After a gyro-off command plus mode-1
+commands with tag 0, the board's motor data froze (encoders and currents stuck) while the rest of it kept
+answering. Only a full power-off (battery out ~30 s) recovered it. A PC reboot doesn't reset the board:
+it's the power controller.
+
+**The power watchdog works as described [tested].** When the board's USB link dropped (a loose mini-USB
+cable on J8 of the TX011), refreshes stopped getting through and the board cut power 5 min 19 s later.
+While the link is down it keeps doing that after every boot. Secure that cable: lifting the robot's top
+can pull it out.
+
+**On the floor it behaves [tested].** With the limiter-clock tag, mode 1 and gyro mode on, through the motor
+server: forward and backward 0.1 m/s for 1 s moved 8 cm straight, with no heading change; turning left
+0.3 rad/s for 2.5 s turned 34°, and right 26°. Every pulse stopped within ~0.25 s of the last command,
+with no twitching and no run-on. Everything odd on blocks (twitching, a wheel running on for seconds,
+straight commands turning) came from the board steering by its gyro while the body couldn't move.
+Bench tests on blocks can only show direction; judge behaviour on the floor.
+
+**Turning accelerates slowly [tested].** A 1 s turn command at 0.3 rad/s turned only ~4°: the board limits
+angular acceleration (`getLimits` has a 0.3 that fits rad/s²). Hold a turn for 2+ s to reach full rate.
+
+**Odometry needs calibrating [tested].** For the 34° turn, the gyro (`integratedYaw`) said 34° while the
+encoders with Beam's `−(L + R) × 0.019415744` gave ~23°. Prefer the gyro for heading until this is sorted.

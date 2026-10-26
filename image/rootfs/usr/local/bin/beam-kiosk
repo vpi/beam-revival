@@ -2,15 +2,33 @@
 # Robot screen: Chromium in a single-app Wayland compositor (cage) on tty1.
 # Started from the kiosk user's login shell (autologin on tty1). If it exits, getty logs in again.
 URL=$(cat /etc/beam/kiosk-url 2>/dev/null || echo http://localhost:8080/robot)
+STATUS="http://127.0.0.1:8080/api/status${URL#*/robot}"
 
 # Wait for the motor server so the first page load doesn't hit an error page.
 for _ in $(seq 60); do
-  curl -fs -o /dev/null "http://127.0.0.1:8080/api/status${URL#*/robot}" && break
+  curl -fs -o /dev/null "$STATUS" && break
   sleep 1
 done
 
-exec cage -d -s -- chromium \
+cage -d -s -- chromium \
   --kiosk --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
   --check-for-update-interval=31536000 --password-store=basic \
   --autoplay-policy=no-user-gesture-required --use-fake-ui-for-media-stream \
-  --ozone-platform=wayland "$URL"
+  --ozone-platform=wayland "$URL" &
+CAGE=$!
+
+# Watchdog: on the first boot on a Beam+, Chromium once started but never loaded the page (white
+# screen). If the server hasn't served the robot page since we started, restart the screen.
+START=$(date +%s)
+while kill -0 "$CAGE" 2>/dev/null; do
+  sleep 5
+  ELAPSED=$(( $(date +%s) - START ))
+  AGE=$(curl -fs "$STATUS" | sed -n 's/.*"robot_page_age_s": \([0-9.]*\).*/\1/p' | cut -d. -f1)
+  [ -n "$AGE" ] && [ "$AGE" -le "$ELAPSED" ] && break       # page loaded since we started: all good
+  if [ "$ELAPSED" -ge 90 ]; then
+    echo "robot page not loaded after ${ELAPSED}s; restarting the screen" | systemd-cat -t beam-kiosk
+    kill "$CAGE"
+    break
+  fi
+done
+wait "$CAGE"

@@ -26,6 +26,8 @@ from . import protocol as p
 log = logging.getLogger("beam.sim")
 
 # Beam+ ("cleveland") limits from Communicator::getLimits: linear 1.0, angular 1.0.
+LIMITER_TAG_MAX_AGE = 2000 << 32           # ~1 s of limiter clock (the real limit is unknown)
+LIMITER_CLOCK_START = 729_000_000
 BEAMPLUS_LINEAR_LIMIT = 1.0
 BEAMPLUS_ANGULAR_LIMIT = 1.0
 LINEAR_ACCEL = 1.0        # m/s^2, assumed board-side ramp
@@ -95,6 +97,7 @@ class SimulatedBoard:
         self.capacity_max = 100.0
         self.capacity = 80.0
         self.tag = 0
+        self.timed_out = True
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -137,6 +140,11 @@ class SimulatedBoard:
     def now(self) -> float:
         return time.monotonic() - self._t0
 
+    def limiter_clock(self) -> int:
+        # The real Beam+ board counts ~2000 per second in the upper 32 bits of its limiter clock, and that
+        # count was already ~730 million on ours (it doesn't restart at power-on).
+        return (LIMITER_CLOCK_START + int(self.now() * 2000)) << 32
+
     @property
     def powered(self) -> bool:
         return self._powered
@@ -175,8 +183,14 @@ class SimulatedBoard:
         self.stats.commands += 1
         if cmd.code == p.CMD_VELOCITY:
             self.stats.velocity_commands += 1
-            self.cmd_linear = p.from_fixed(cmd.a)
-            self.cmd_angular = p.from_fixed(cmd.b)
+            # Like the real board: only a recent value of our limiter clock counts as a fresh command.
+            age = self.limiter_clock() - cmd.tag
+            self.timed_out = not 0 <= age <= LIMITER_TAG_MAX_AGE
+            if self.timed_out:
+                self.cmd_linear = self.cmd_angular = 0.0
+            else:
+                self.cmd_linear = p.from_fixed(cmd.a)
+                self.cmd_angular = p.from_fixed(cmd.b)
             self.tag = cmd.tag
             self.stats.last_velocity_cmd = (self.cmd_linear, self.cmd_angular)
             self.stats.last_tag = cmd.tag
@@ -215,7 +229,7 @@ class SimulatedBoard:
     def status(self) -> p.Status:
         flags = 0
         if self._powered:
-            flags |= p.FLAG_MOTORS_ENABLED | p.FLAG_BATTERY_ENABLED
+            flags |= p.FLAG_MOTORS_ENABLED
         if self.docked:
             flags |= p.FLAG_CHARGER_DETECTED | p.FLAG_CHARGING
         lim_lin = _clamp(self.cmd_linear, BEAMPLUS_LINEAR_LIMIT)
@@ -230,7 +244,7 @@ class SimulatedBoard:
             capacity=self.capacity, capacity_max=self.capacity_max,
             timestamp_us=int(self.now() * 1e6) & 0xFFFFFFFF,
             encoder_l=int(self.enc_l), encoder_r=int(self.enc_r),
-            limiter_tag=self.tag,
+            limiter_tag=self.limiter_clock(),
             actual_linear=self.linear, actual_angular=self.angular,
             limited_linear=lim_lin, limited_angular=lim_ang,
             linear_limit=BEAMPLUS_LINEAR_LIMIT, angular_limit=BEAMPLUS_ANGULAR_LIMIT,

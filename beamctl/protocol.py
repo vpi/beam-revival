@@ -34,11 +34,28 @@ POWER_OFF = 2
 DRIVING_MODE_DEFAULT = 1
 FIXED = 65536.0
 
-# Status flag bits
+# Status flag bits, named as in Beam's Communicator::inFlagsToString (bits 24-31 are also the fault code)
 FLAG_MOTORS_ENABLED = 1 << 0
-FLAG_BATTERY_ENABLED = 1 << 1
+FLAG_BRAKE_DISABLE = 1 << 1
+FLAG_TIMEOUT = 1 << 16
+FLAG_BUTTON = 1 << 17
+FLAG_RRQ = 1 << 20
 FLAG_CHARGING = 1 << 22
 FLAG_CHARGER_DETECTED = 1 << 23
+FLAG_NAMES = {
+    FLAG_MOTORS_ENABLED: "ENABLED", FLAG_BRAKE_DISABLE: "BRAKE_DISABLE", FLAG_TIMEOUT: "TIMEOUT",
+    FLAG_BUTTON: "BUTTON", FLAG_RRQ: "RRQ", FLAG_CHARGING: "CHARGING", FLAG_CHARGER_DETECTED: "CHARGE",
+    1 << 25: "TEMP", 1 << 26: "GYRO", 1 << 27: "SPI", 1 << 28: "DRIVE", 1 << 29: "OV", 1 << 30: "UV", 1 << 31: "OC",
+}
+
+# Velocity commands carry a "limiter tag". The board only drives on a command whose tag is a recent value
+# of its own limiter clock, the u64 it reports in every status (Status.limiter_tag). Anything else looks
+# stale: the board ignores the speeds. So the host echoes the latest limiter_tag back. [confirmed on a Beam+]
+# (The TIMEOUT flag is unrelated: the real board reports it whether or not it is driving.)
+
+
+def flag_names(flags: int) -> list[str]:
+    return [name for bit, name in sorted(FLAG_NAMES.items()) if flags & bit]
 
 # Scale factors taken from Communicator::readStatus
 CURRENT_SCALE = 0.0007947286
@@ -128,7 +145,7 @@ assert _STATUS.size == 128
 
 @dataclass
 class Status:
-    flags: int = FLAG_MOTORS_ENABLED | FLAG_BATTERY_ENABLED
+    flags: int = FLAG_MOTORS_ENABLED
     speed_l: int = 0
     speed_r: int = 0
     current_l: int = 0                 # raw; amps = raw * CURRENT_SCALE
@@ -189,9 +206,12 @@ class Status:
             "charging": self.charging,
             "charger_detected": self.charger_detected,
             "fault": self.fault,
+            "flags": flag_names(self.flags),
             "battery_voltage": round(self.battery_voltage, 2),
             "battery_current": round(self.battery_current, 2),
             "battery_percent": None if self.battery_percent is None else round(self.battery_percent, 1),
+            "encoder_l": self.encoder_l,
+            "encoder_r": self.encoder_r,
             "actual_linear": round(self.actual_linear, 3),
             "actual_angular": round(self.actual_angular, 3),
             "limited_linear": round(self.limited_linear, 3),

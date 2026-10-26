@@ -6,6 +6,7 @@
   beam-setup tailscale   join the tailnet, publish HTTPS with `tailscale serve` (every boot)
   beam-setup audio       Beam+ codec setup: speaker amplifier, mic inputs       (every boot)
   beam-setup backup      read-only image of the robot's internal disk           (once)
+  beam-setup cameras     load camera firmware (copied from the internal disk)    (boot, camera plug-in)
 
 Progress for the person standing at the robot goes to /run/beam/setup.json,
 which the motor server passes to the robot screen.
@@ -252,20 +253,28 @@ def cmd_firstboot() -> None:
 
 # --- internal disk backup -------------------------------------------------------
 
+def internal_disk() -> dict | None:
+    """The robot's own (internal, non-removable) disk, or None if there isn't exactly one."""
+    root_disk = run("lsblk", "-no", "PKNAME", run("findmnt", "-no", "SOURCE", "/").stdout.strip()).stdout.strip()
+    disks = json.loads(run("lsblk", "-J", "-b", "-d", "-o", "NAME,RM,SIZE,TYPE,MODEL,SERIAL,TRAN").stdout)["blockdevices"]
+    cands = [d for d in disks if d["type"] == "disk" and d["name"] != root_disk and not d["rm"]
+             and d.get("tran") != "usb" and 0 < int(d["size"]) <= 64 * 2**30]
+    if len(cands) != 1:
+        log(f"expected one internal disk, found {[d['name'] for d in cands]}")
+        return None
+    return cands[0]
+
+
 def cmd_backup() -> None:
     """Image the robot's own (internal, non-removable) disk once, read-only, before anything else happens."""
     dest = STATE / "backup"
     if any(dest.glob("*.img.zst")):
         log("backup already present")
         return
-    root_disk = run("lsblk", "-no", "PKNAME", run("findmnt", "-no", "SOURCE", "/").stdout.strip()).stdout.strip()
-    disks = json.loads(run("lsblk", "-J", "-b", "-d", "-o", "NAME,RM,SIZE,TYPE,MODEL,SERIAL,TRAN").stdout)["blockdevices"]
-    cands = [d for d in disks if d["type"] == "disk" and d["name"] != root_disk and not d["rm"]
-             and d.get("tran") != "usb" and 0 < int(d["size"]) <= 64 * 2**30]
-    if len(cands) != 1:
-        log(f"not backing up: expected one internal disk, found {[d['name'] for d in cands]}")
+    d = internal_disk()
+    if d is None:
+        log("not backing up")
         return
-    d = cands[0]
     size = int(d["size"])
     dest.mkdir(parents=True, exist_ok=True)
     if shutil.disk_usage(dest).free < size:
@@ -288,6 +297,72 @@ def cmd_backup() -> None:
         f"Read-only image of the robot's internal disk /dev/{d['name']} ({d.get('model')}, {size} bytes),\n"
         f"taken {time.strftime('%Y-%m-%d %H:%M')}. Restore with: zstd -dc {out.name} | dd of=/dev/<disk> bs=4M\n")
     log("backup complete")
+
+
+# --- cameras -------------------------------------------------------------------
+
+CAMERA_FW = STATE / "camera-firmware"
+CAMERA_FW_FILES = ("cleveland_head.elf", "cleveland_nav.elf")
+
+
+def camera_firmware() -> bool:
+    """Copy the camera firmware from the robot's own software (internal disk, mounted read-only), once.
+
+    It's Suitable Technologies' firmware, so this project doesn't ship it: every robot has its own copy."""
+    if all((CAMERA_FW / f).exists() for f in CAMERA_FW_FILES):
+        return True
+    d = internal_disk()
+    if d is None:
+        return False
+    parts = [p["name"] for p in json.loads(run("lsblk", "-J", "-o", "NAME,TYPE", f"/dev/{d['name']}").stdout)
+             ["blockdevices"][0].get("children", []) if p["type"] == "part"]
+    mnt = Path("/run/beam/internal")
+    mnt.mkdir(parents=True, exist_ok=True)
+    for part in parts:
+        # noload: never replay the journal, so nothing at all is written to the internal disk
+        if run("mount", "-o", "ro,noload", f"/dev/{part}", str(mnt), check=False).returncode != 0:
+            continue
+        try:
+            for tgz in sorted(mnt.glob("images/software-*.tgz")):
+                log(f"extracting camera firmware from {part}:{tgz.relative_to(mnt)}")
+                CAMERA_FW.mkdir(parents=True, exist_ok=True)
+                members = [f"./home/st/sw-dev/firmware/{f}" for f in CAMERA_FW_FILES]
+                r = run("tar", "xzf", str(tgz), "-C", str(CAMERA_FW), "--strip-components=5",
+                        "--no-same-owner", *members, check=False)
+                if r.returncode == 0 and all((CAMERA_FW / f).exists() for f in CAMERA_FW_FILES):
+                    return True
+                log(f"not found in {tgz.name}: {r.stderr.strip()[:200]}")
+        finally:
+            run("umount", str(mnt), check=False)
+    return False
+
+
+def cmd_cameras() -> None:
+    """Load the firmware into any camera still in its bootloader (25a1:4006/4007). RAM only, never flash."""
+    sys.path.insert(0, "/opt/beam-revival")
+    from beamctl import fx3load
+
+    if not camera_firmware():
+        note(camera="Camera firmware not found on the robot's internal disk")
+        return
+    deadline = time.monotonic() + 10           # both cameras usually enumerate within a few seconds
+    while time.monotonic() < deadline:
+        waiting = [name for name, (boot_pid, _, _) in fx3load.CAMERAS.items() if fx3load.find_devices(boot_pid)]
+        for name in waiting:
+            boot_pid, _, fw = fx3load.CAMERAS[name]
+            for dev in fx3load.find_devices(boot_pid):
+                try:
+                    fx3load.load(dev, (CAMERA_FW / fw).read_bytes())
+                    log(f"{name} camera: firmware loaded via {dev}")
+                except OSError as e:
+                    log(f"{name} camera: load failed ({e}); will retry")
+        if all(state == "camera" for state in fx3load.status().values()):
+            break
+        time.sleep(1)
+    states = fx3load.status()
+    log("cameras: " + ", ".join(f"{k} {v}" for k, v in states.items()))
+    missing = [k for k, v in states.items() if v != "camera"]
+    note(camera=f"{' and '.join(missing).capitalize()} camera not working" if missing else None)
 
 
 # --- audio ---------------------------------------------------------------------
@@ -335,7 +410,7 @@ def cmd_audio() -> None:
 
 
 COMMANDS = {"firstboot": cmd_firstboot, "config": cmd_config, "tailscale": cmd_tailscale,
-            "audio": cmd_audio, "backup": cmd_backup}
+            "audio": cmd_audio, "backup": cmd_backup, "cameras": cmd_cameras}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:

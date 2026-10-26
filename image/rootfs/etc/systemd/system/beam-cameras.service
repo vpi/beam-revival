@@ -1,0 +1,10 @@
+[Unit]
+Description=Load the Beam+ camera firmware into the cameras (RAM only)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/beam-setup cameras
+
+[Install]
+WantedBy=multi-user.target

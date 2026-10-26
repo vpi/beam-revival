@@ -69,7 +69,8 @@ them in the file with `(saved on robot)`. To change Wi-Fi later, edit the file a
 | **Drive me at** `https://beam.….ts.net/` | Ready. Open that address on any device signed in to Tailscale. |
 | *No Wi-Fi set up yet* | `beam.conf` has no Wi-Fi. Fix it on a PC and reboot. |
 | *Motor board not connected* | The server can't see the motor board (`25a1:000b`). See troubleshooting. |
-| *Camera not found* | Cameras not detected yet. The page retries every 30 s. |
+| *Camera not found* | Cameras not ready yet: their firmware loads a few seconds after boot. The page retries every 10 s. |
+| *Camera firmware not found…* | The firmware couldn't be copied from the robot's internal disk. See troubleshooting. |
 
 **First boot only**, two things happen automatically:
 - the system grows to fill the stick
@@ -91,6 +92,7 @@ them in the file with `(saved on robot)`. To change Wi-Fi later, edit the file a
 | `beam-config` | Applies `beam.conf` on every boot. |
 | `beam-tailscale` | Joins Tailscale, then `tailscale serve` → HTTPS on your tailnet only. |
 | `beam-audio` | Beam+ audio chip setup: turns on the speaker amplifier and mic inputs (ported from Beam). |
+| `beam-cameras` | Loads the camera firmware into both cameras at boot (and whenever one resets). See below. |
 | `beam-firstboot`, `beam-backup` | One-time: grow the partition, new SSH host keys, internal disk backup. |
 | tty1 autologin → `beam-kiosk` | The robot screen: Chromium in `cage`, showing `http://localhost:8080/robot`. |
 
@@ -110,9 +112,12 @@ Use `ssh beam@beam.<your-tailnet>.ts.net`. Password logins are off; keys come fr
   refreshing the board's power watchdog. Check `journalctl -u beam-server` and `ls -l /dev/beam-motor`.
 - **Motor board not connected.** Run `lsusb | grep 25a1`. `25a1:000b` should be listed. If it's
   missing, the board may be off (power button) or in firmware-update mode.
-- **No camera.** `lsusb` should list `25a1:0006` (head) and `25a1:0007` (floor). If they show as
-  `25a1:4006`/`4007`, they're in bootloader mode and need Beam's firmware tool, which this
-  image doesn't include. Booting Beam's original system once (stick removed) should repair them.
+- **No camera.** The Beam+ cameras power up in a bootloader (`lsusb`: `25a1:4006` head, `25a1:4007` floor)
+  and only become webcams (`25a1:0006`, `0007`) once their firmware is loaded into their RAM. `beam-cameras`
+  does that on every boot. It copies the firmware (Suitable's `cleveland_head.elf` / `cleveland_nav.elf`, not
+  included in this project) once from the robot's internal disk, mounted read-only, to
+  `/var/lib/beam/camera-firmware/`. Check `journalctl -u beam-cameras`. If the internal disk was wiped, copy the
+  two files there from another Beam+ install. Nothing is ever written to the cameras' flash.
 - **No sound from the speaker.** `journalctl -u beam-audio` should say "applied … ALC662
   settings". Check volume with `alsamixer` as the kiosk user.
 - **Back to the original Beam software:** shut down, remove the stick, power on.

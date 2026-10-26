@@ -125,6 +125,40 @@ What the four rounds suggest:
 - If guides are tried again, test **one at a time** (angle marks only; map only): this round changed
   three things at once, so it can't say which one hurt.
 
+## Round 5: big actions (2026-10-25)
+
+First, **models can draw accurate boxes:** median angle error 0.3–0.5° for DeepSeek and GLM
+(`python3 -m beambrain.grounding`). So with big actions the model names what to approach or which doorway
+to use, and the driver does the geometry (see `docs/ai-driving.md`). The start position was also moved to
+the doorway's centre line, and a new baseline was run with the same setup.
+
+| | Baseline (new start) | Big actions |
+|---|---|---|
+| Success | **9/24** | 7/24 |
+| Ball | 8/8 | 6/8 |
+| Kitchen | 0/8 | **1/8**, the first real-run kitchen success (DeepSeek-Flash) |
+| Bed | 1/8 | 0/8 |
+| Bumps | 77 | 226 |
+
+Results: `~/beam-brain/bakeoff/20261025-210250` (baseline) and `…-215941` (big actions).
+
+**What the logs show:**
+- **Used in the right order, big actions are excellent.** GLM's successful ball run took 3 steps and one minute:
+  `go_through_doorway` → `approach("the red ball")` → `done`. Before, that took 7–10 steps.
+- **`approach` drives in a straight line** to the target. When the target is in the next room, that
+  line often crosses the door frame. 14 of 22 approaches ended blocked, and models repeated the same
+  failing action instead of using the doorway first.
+- **Retries multiply bumps:** each blocked attempt is retried, hence 226 bumps.
+
+**Conclusion:** the split of work is right. The model is good at "which thing, which doorway", and the
+driver aims precisely from boxes. But the driver is **blind to obstacles** until it hits one. Fixing that
+properly needs either obstacle sensing (ultrasonic/ToF range sensors, or a lidar, as Beam's own
+software supported for the BeamPro) or a map with path planning, not more prompting.
+
+**Status:** big actions stay opt-in (`AIDriver(big_actions=True)`, bake-off `--big-actions`). The default AI
+driver is unchanged: DeepSeek-V4.1-Flash, no guides, no big actions. Fine for "approach what you can see"
+with a person watching.
+
 ## Earlier ideas (before round 4)
 
 1. **Angle guides on the camera image:** small tick marks at −30°, −15°, 0, +15°, +30° drawn on the frame

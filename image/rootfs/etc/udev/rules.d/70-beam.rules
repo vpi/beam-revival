@@ -4,3 +4,5 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0001", SYMLINK+="b
 # Beam+ head and nav cameras (UVC)
 SUBSYSTEM=="video4linux", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0006", SYMLINK+="video-head"
 SUBSYSTEM=="video4linux", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0007", SYMLINK+="video-nav"
+# Cameras still in their bootloader (no firmware yet): load it. Runs at boot and after any camera reset.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="25a1", ATTR{idProduct}=="4006|4007", TAG+="systemd", ENV{SYSTEMD_WANTS}+="beam-cameras.service"

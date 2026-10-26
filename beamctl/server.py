@@ -50,7 +50,7 @@ class Config:
     linear_accel: float = 0.8                  # m/s^2
     linear_decel: float = 1.5                  # m/s^2 (stopping is allowed to be quicker)
     angular_accel: float = 2.5                 # rad/s^2
-    tag_mode: str = "board_time"               # board_time | zero | counter  (see docs section 7)
+    tag_mode: str = "limiter"                  # limiter | board_time | zero | counter  (see docs section 7)
     gyro_mode: bool = True
     telemetry_hz: float = 10.0
     token: str | None = None
@@ -263,8 +263,10 @@ class MotorController:
         if mode == "counter":
             self._counter += 1
             return self._counter
-        # board_time: echo the board's own clock from the latest status (hypothesis, docs section 7)
-        return self.link.status.timestamp_us if self.link.status else 0
+        if mode == "board_time":
+            return self.link.status.timestamp_us if self.link.status else 0
+        # limiter: echo the board's limiter clock. The only tag the real board drives on (docs section 7).
+        return self.link.status.limiter_tag if self.link.status else 0
 
     # --- telemetry -------------------------------------------------------------
 
@@ -365,10 +367,14 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
         proxied = any(h in request.headers for h in ("X-Forwarded-For", "Forwarded", "Tailscale-User-Login"))
         return request.remote in ("127.0.0.1", "::1") and not proxied
 
+    robot_page_served: list[float] = []         # when the robot screen last loaded its page (kiosk watchdog)
+
     def page(name: str):
         async def handler(request: web.Request) -> web.StreamResponse:
             if not authorized(request):
                 raise web.HTTPUnauthorized(text="Add ?token=... to the URL")
+            if name == "robot.html":
+                robot_page_served[:] = [time.monotonic()]
             return web.FileResponse(WEB_DIR / name, headers={"Cache-Control": "no-cache"})
         return handler
 
@@ -378,6 +384,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
         snap = ctrl.snapshot()
         snap["media"] = hub.snapshot()
         snap["setup"] = read_setup(cfg.setup_file)
+        snap["robot_page_age_s"] = round(time.monotonic() - robot_page_served[0], 1) if robot_page_served else None
         return web.json_response(snap)
 
     async def robot_ws(request: web.Request) -> web.WebSocketResponse:
@@ -563,7 +570,7 @@ def main() -> None:
     ap.add_argument("--max-linear", type=float, default=Config.max_linear, help="m/s (default %(default)s)")
     ap.add_argument("--max-angular", type=float, default=Config.max_angular, help="rad/s (default %(default)s)")
     ap.add_argument("--deadman", type=float, default=Config.deadman_s, help="seconds (default %(default)s)")
-    ap.add_argument("--tag-mode", choices=["board_time", "zero", "counter"], default=Config.tag_mode)
+    ap.add_argument("--tag-mode", choices=["limiter", "board_time", "zero", "counter"], default=Config.tag_mode)
     ap.add_argument("--token", help="require ?token=... on the page URL")
     ap.add_argument("--setup-file", default=Config.setup_file, help=argparse.SUPPRESS)
     ap.add_argument("--tls-cert", help="serve HTTPS (needed for the pilot's microphone); see scripts/make-cert.sh")

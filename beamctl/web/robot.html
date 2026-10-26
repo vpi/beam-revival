@@ -362,6 +362,7 @@
       parts.push(`<b>Drive me at</b><code>${esc(setup.url)}</code>`);
     }
     if (setup && setup.message) parts.push(`<div class="warn">${esc(setup.message)}</div>`);
+    if (setup && setup.camera) parts.push(`<div class="warn">${esc(setup.camera)}</div>`);
     if (link && !link.connected) parts.push(`<div class="warn">Motor board not connected${link.last_error ? ": " + esc(link.last_error) : ""}</div>`);
     box.innerHTML = parts.join("");
     box.style.display = parts.length ? "block" : "none";
@@ -384,8 +385,8 @@
     } catch (e) {
       showError("Camera/microphone unavailable: " + e.message);
       $("title").textContent = "Camera not found";
-      $("subtitle").textContent = "Retrying in 30 seconds";
-      setTimeout(() => location.reload(), 30000);    // cameras can appear late after boot
+      $("subtitle").textContent = "Retrying in 10 seconds";
+      setTimeout(() => location.reload(), 10000);    // cameras appear a few seconds after their firmware loads
       return;
     }
     render();
