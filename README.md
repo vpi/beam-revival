@@ -3,6 +3,14 @@
 A local, cloud-free control stack for the Suitable Technologies **Beam+** telepresence robot,
 whose cloud service is gone.
 
+<p align="center">
+  <img src="docs/images/robot-with-phone.jpg" alt="The Beam+ running beam-revival, with an optional Android phone mounted on its stem as a touch panel and rear camera" height="420">
+  &nbsp;
+  <img src="docs/images/drivers-view.jpg" alt="The driving page: head camera, floor camera inset, rear view from the phone, joystick, STOP button and robot status" height="420">
+  <br>
+  <sub>The robot with the optional phone panel, and the driving page: head camera, floor camera (bottom right), rear view from the phone (top right).</sub>
+</p>
+
 > **Unofficial hobby project.** Not affiliated with, endorsed by or supported by Suitable Technologies,
 > Blue Ocean Robotics, GoBe Robots or Awabot. "Beam" and "Beam+" are their trademarks. This repository
 > contains no Beam software, firmware or disk images. The motor-board protocol notes in
