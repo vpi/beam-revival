@@ -90,7 +90,7 @@ in_root apt-get install -y -qq --no-install-recommends \
   firmware-linux-free firmware-misc-nonfree firmware-atheros firmware-realtek firmware-intel-sound firmware-iwlwifi \
   grub-pc-bin grub-efi-amd64-bin grub2-common \
   network-manager wpasupplicant iw wireless-regdb openssh-server sudo ca-certificates curl gnupg \
-  python3 python3-aiohttp \
+  python3 python3-aiohttp adb \
   chromium cage fonts-dejavu-core xwayland \
   pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils alsa-tools \
   mesa-va-drivers intel-media-va-driver-non-free i965-va-driver \
@@ -125,7 +125,7 @@ chmod 440 "$ROOT/etc/sudoers.d/beam"
 # Kiosk: tty1 autologin starts the robot screen.
 echo '[ "$(tty)" = /dev/tty1 ] && exec /usr/local/bin/beam-kiosk' > "$ROOT/home/kiosk/.bash_profile"
 in_root chown kiosk:kiosk /home/kiosk/.bash_profile
-in_root systemctl enable -q beam-firstboot beam-config beam-server beam-tailscale beam-audio beam-backup beam-cameras beam-display \
+in_root systemctl enable -q beam-firstboot beam-config beam-server beam-tailscale beam-audio beam-backup beam-cameras beam-display beam-phone \
   NetworkManager ssh tailscaled systemd-timesyncd
 in_root systemctl --global enable -q pipewire.socket pipewire-pulse.socket wireplumber.service 2>/dev/null || true
 

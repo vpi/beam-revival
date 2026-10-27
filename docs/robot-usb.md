@@ -96,7 +96,7 @@ Unplug and replug the stick. Windows shows a drive called **BEAMCONFIG**. Open `
 
 | Setting | |
 |---|---|
-| `WIFI_SSID`, `WIFI_PASSWORD` | Your Wi-Fi (2.4 or 5 GHz). Required. |
+| `WIFI_SSID`, `WIFI_PASSWORD` | Your Wi-Fi. Required. Prefer 5 GHz: on a busy 2.4 GHz network the video gets blurry. |
 | `TAILSCALE_AUTHKEY` | Optional. Create one at login.tailscale.com → Settings → **Keys** → *Generate auth key* (one-off, pre-approved). Without it, the robot screen shows a login link to open on your phone instead. |
 | `ROBOT_NAME` | Its name on your tailnet. The default `beam` gives `https://beam.<your-tailnet>.ts.net/`. |
 | `MAX_SPEED` | Top speed in m/s (0.6 by default; the board's limit is 1.0). Start low: 0.3 suits a small home. |
@@ -107,7 +107,8 @@ Unplug and replug the stick. Windows shows a drive called **BEAMCONFIG**. Open `
 | `SSH_KEY` | Public keys allowed to SSH in as `beam` (one `SSH_KEY=` line each). Filled in with the key you gave `build-image.sh --ssh-key`. Without any key, SSH logins are impossible: there are no passwords. |
 
 On boot, the robot moves the Wi-Fi password and Tailscale key into its system and replaces
-them in the file with `(saved on robot)`. To change Wi-Fi later, edit the file again.
+them in the file with `(saved on robot)`. To change Wi-Fi later, edit the file again. To move to
+another network with the same password (say, the router's 5 GHz name), change only `WIFI_SSID`.
 
 ## 3. Boot the robot from the stick
 

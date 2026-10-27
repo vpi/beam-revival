@@ -353,6 +353,28 @@ def visitor_name(request: web.Request) -> str | None:
     return first or None
 
 
+CAMERA_ROLES = {"25a1:0006": "head", "25a1:0007": "nav"}
+
+
+def camera_roles(sysfs: str = "/sys/class/video4linux") -> list[str]:
+    """The role of each camera, in the order the robot page's browser lists them (/dev/video* order).
+
+    Both Beam+ cameras call themselves "M034-WDR" and Chromium shows no USB id, so the page can't tell
+    them apart by label; which one becomes /dev/video0 depends on which firmware loaded first.
+    """
+    roles = []
+    for d in sorted(Path(sysfs).glob("video*")):
+        try:
+            if (d / "index").read_text().strip() != "0":      # each camera also has a metadata node
+                continue
+            usb = (d / "device").resolve().parent
+            vid_pid = f"{(usb / 'idVendor').read_text().strip()}:{(usb / 'idProduct').read_text().strip()}"
+        except OSError:
+            vid_pid = ""
+        roles.append(CAMERA_ROLES.get(vid_pid, "other"))
+    return roles
+
+
 def read_setup(path: str) -> dict | None:
     """Setup notes from the robot image (e.g. {"tailscale_login_url": ..., "url": ...}); None if absent."""
     try:
@@ -416,6 +438,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
         snap = ctrl.snapshot()
         snap["media"] = hub.snapshot()
         snap["setup"] = read_setup(cfg.setup_file)
+        snap["cameras"] = camera_roles()
         snap["robot_page_age_s"] = round(time.monotonic() - robot_page_served[0], 1) if robot_page_served else None
         return web.json_response(snap)
 
@@ -439,10 +462,53 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                         await hub.frame_from_robot(msg.data)
                     elif m.get("type") == "rtc":
                         await hub.from_robot(str(m["to"]), m["data"])
+                    elif m.get("type") == "video_stats":
+                        log.info("video to a driver: captured %s, sent %s", m.get("captured"), m.get("sent"))
+                    elif m.get("type") == "cameras":
+                        log.info("robot page cameras: head=#%s nav=#%s, roles %s, labels %s", m.get("head"), m.get("nav"), m.get("roles"), m.get("all"))
                 except (ValueError, TypeError, KeyError):
                     pass
         finally:
             hub.detach_robot(ws)
+        return ws
+
+    async def panel_ws(request: web.Request) -> web.WebSocketResponse:
+        # The phone on the robot (beam-setup phone forwards its localhost:8080 over USB): its camera is a
+        # media source, so like the robot page it must be on the robot itself.
+        if not (is_local(request) or allow_remote_robot):
+            raise web.HTTPForbidden(text="the panel must run on the phone attached to the robot")
+        ws = web.WebSocketResponse(heartbeat=5.0)
+        await ws.prepare(request)
+        await hub.attach_panel(ws)
+
+        async def push() -> None:
+            while not ws.closed:
+                snap = ctrl.snapshot()
+                snap["media"] = hub.snapshot()
+                try:
+                    await ws.send_json(snap)
+                except ConnectionError:
+                    return
+                await asyncio.sleep(0.5)
+        pusher = asyncio.create_task(push())
+        try:
+            async for msg in ws:
+                if msg.type != WSMsgType.TEXT:
+                    continue
+                try:
+                    m = json.loads(msg.data)
+                    kind = m.get("type")
+                    if kind == "sleep":
+                        ctrl.go_to_sleep("someone at the robot")
+                    elif kind == "wake":
+                        ctrl.wake_up("someone at the robot")
+                    else:
+                        await hub.from_panel(m)
+                except (ValueError, TypeError, AttributeError):
+                    pass
+        finally:
+            pusher.cancel()
+            await hub.detach_panel(ws)
         return ws
 
     async def brain_ws(request: web.Request) -> web.WebSocketResponse:
@@ -499,6 +565,8 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
             return await robot_ws(request)
         if request.query.get("role") == "brain":
             return await brain_ws(request)
+        if request.query.get("role") == "panel":
+            return await panel_ws(request)
         ws = web.WebSocketResponse(heartbeat=5.0)
         await ws.prepare(request)
         me = object()
@@ -544,6 +612,8 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                         ctrl.set_estop(False)
                     elif kind == "rtc":
                         await hub.from_pilot(pid, m["data"])
+                    elif kind == "rear_light":
+                        await hub.rear_light_from_pilot(bool(m.get("on")))
                     elif kind == "brain":
                         await hub.brain_cmd_from_pilot(pid, m["data"])
                 except (ValueError, TypeError, AttributeError, KeyError):
@@ -557,6 +627,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
 
     app.router.add_get("/", page("index.html"))
     app.router.add_get("/robot", page("robot.html"))
+    app.router.add_get("/panel", page("panel.html"))
     app.router.add_get("/api/status", status)
     app.router.add_get("/ws", ws_handler)
 

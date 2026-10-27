@@ -22,6 +22,8 @@ Tested on a real Beam+ (October 2026), running from a USB stick, with the robot'
   nothing exposed to the internet
 - **Sleep mode**, by button or on a nightly schedule: cameras, microphone and screen off, and woken
   remotely from the driving page
+- Optional **phone panel**: a spare Android phone on the robot becomes a touch screen for people in
+  the room, a rear camera with a light, and a "Call owner" button ([docs/phone.md](docs/phone.md))
 - Experimental, so far only tried against the simulator: face recognition with spoken greetings, and AI
   driving ([docs/brain.md](docs/brain.md))
 
@@ -79,13 +81,14 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 | Driving, live video, two-way audio, charging, remote access | **core**, tested on a Beam+ | the robot, Wi-Fi, Tailscale (recommended) | always on |
 | Sleep mode (button) | **core**, tested | – | always available |
 | Nightly sleep schedule | optional, tested | – | `SLEEP_HOURS`, `TIMEZONE` in `beam.conf` |
+| Phone panel: touch screen for people in the room, rear camera and light, Call owner | optional, tested | a spare Android phone (USB-C, Chrome) | plug it in, see [docs/phone.md](docs/phone.md) |
 | Face recognition and spoken greetings | **experimental** | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
 | AI driving | **experimental**, simulator only so far | the brain, plus an AI provider API key | see [docs/ai-driving.md](docs/ai-driving.md) |
 
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.0` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.2` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one
@@ -122,8 +125,13 @@ A browser on the robot handles the cameras and audio. That gives hardware video 
 more importantly, **echo cancellation**: the robot's speaker sits next to its microphone, so
 without it you'd hear yourself back. The server only relays the setup messages.
 
-The robot page picks the head camera (`25a1:0006`) and floor camera (`25a1:0007`) by USB id.
-Override with `/robot?head=<label text>&nav=<label text>` if needed.
+The robot page picks the head camera (`25a1:0006`) and floor camera (`25a1:0007`) by USB id. The
+browser names both just "M034-WDR", so the server reads which is which from the system and tells the
+page. Override with `/robot?head=<label text>&nav=<label text>` if needed.
+
+With the optional phone panel, the phone sends its back camera to the robot page over your Wi-Fi,
+and the robot passes it on to drivers as a third video: drivers away from home can't reach the
+phone directly.
 
 **Talk (your microphone) needs HTTPS.** Browsers only allow the microphone on secure pages.
 Seeing and hearing the robot works over plain HTTP. Use Tailscale (below), or for LAN-only use
@@ -170,7 +178,7 @@ in place of the cameras. Logs are in `/tmp/beam-sim.log` and `/tmp/beam-server.l
 Simulator options (`python3 -m beamctl.sim --help`) can inject corrupted or dropped replies.
 
 ```bash
-python3 -m pytest -q        # 82 tests, about a minute and a half
+python3 -m pytest -q        # 93 tests, about a minute and a half
 ```
 
 ## Safety behaviour
@@ -198,6 +206,10 @@ python3 -m pytest -q        # 82 tests, about a minute and a half
 - **The two lights beside the floor camera are switched with the screen's panel power,** not by
   brightness. Sleep mode powers the display down, so they go off too. (You'll also see them blink
   when the screen changes resolution at boot.)
+- **Blurry video usually means busy Wi-Fi.** Ours was on a crowded 2.4 GHz network: the picture fell
+  to 320×240 at under 100 kbps, while on the same router's 5 GHz network it's a sharp 640×480 at
+  about 1.7 Mbps. The robot's Wi-Fi card does 5 GHz; put that network's name in `beam.conf`. The robot's
+  log (`journalctl -u beam-server | grep "video to a driver"`) shows what it actually sends.
 
 What we learned about the hardware is in [docs/motor-protocol.md](docs/motor-protocol.md), section 8.
 

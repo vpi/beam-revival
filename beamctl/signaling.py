@@ -22,6 +22,21 @@ this hub. While a brain is connected, the robot page sends camera frames:
   pilot -> server -> brain:  {"type": "brain_cmd", "from": <pilot id>, "data": {...}}  (enroll, forget, pause)
 Everyone is told {"type": "brain", "online": bool} when it comes and goes, so the robot screen can
 show that face recognition is running.
+
+The optional "panel" is a phone on the robot (USB, see beam-setup phone): a touch screen for people in
+the room, and its back camera as a rear view. The phone is only on the home Wi-Fi, so pilots can't
+reach it directly: the robot page receives the rear camera (over the LAN) and passes it on to every
+pilot as a third video in the connection it already has with them.
+  robot -> server: {"type": "rtc", "to": "panel", "data": {...}}
+  server -> panel: {"type": "rtc", "from": "robot", "data": {...}}
+  panel -> server: {"type": "rtc", "to": "robot", "data": {...}}
+  server -> robot: {"type": "rtc", "from": "panel", "data": {...}}
+The robot page is told {"type": "panel", "online": bool} when it comes and goes, and asks for the
+rear camera only while someone is connected. A pilot's {"type": "rear_light", "on": bool} goes to the
+panel as {"type": "light", "on": bool} (the phone's camera light); the panel answers {"type": "light",
+"on": bool, "available": bool}, which every pilot gets as {"type": "rear_light", ...}. From the panel: {"type": "call"} (someone in
+the room calls the owner) goes to every pilot as {"type": "call"}; {"type": "volume", "delta": d} goes
+to the robot page, which plays the sound.
 """
 
 from __future__ import annotations
@@ -39,6 +54,8 @@ REPLACED_CLOSE_CODE = 4000    # WebSocket close code sent to a robot page that a
 class MediaHub:
     def __init__(self, brain_fps: float = 3.0) -> None:
         self.robot: web.WebSocketResponse | None = None
+        self.panel: web.WebSocketResponse | None = None
+        self.rear_light: dict | None = None      # last {"type": "rear_light", ...} from the panel
         self.pilots: dict[str, web.WebSocketResponse] = {}
         self.pilot_names: dict[str, str] = {}
         self.brain: web.WebSocketResponse | None = None
@@ -63,6 +80,7 @@ class MediaHub:
             await _send(pws, {"type": "robot_online"})
         await self._tell_robot_about_brain()
         await self._tell_robot_about_pilots()
+        await self._tell_robot_about_panel()
 
     def detach_robot(self, ws: web.WebSocketResponse) -> None:
         if self.robot is ws:
@@ -81,13 +99,58 @@ class MediaHub:
     async def detach_pilot(self, pid: str) -> None:
         self.pilots.pop(pid, None)
         self.pilot_names.pop(pid, None)
-        if self.robot is not None:
-            await _send(self.robot, {"type": "rtc", "from": pid, "data": {"kind": "bye"}})
+        for media in (self.robot, self.panel):
+            await _send(media, {"type": "rtc", "from": pid, "data": {"kind": "bye"}})
         await self._tell_robot_about_pilots()
 
     async def _tell_robot_about_pilots(self) -> None:
-        # id -> name, so the robot screen can name the people actually connected to it on video.
-        await _send(self.robot, {"type": "pilots", "names": dict(self.pilot_names)})
+        # id -> name, so the robot screen (and the panel) can name the people connected on video.
+        for media in (self.robot, self.panel):
+            await _send(media, {"type": "pilots", "names": dict(self.pilot_names)})
+
+    # --- panel (phone on the robot) ------------------------------------------
+
+    @property
+    def panel_online(self) -> bool:
+        return self.panel is not None and not self.panel.closed
+
+    async def attach_panel(self, ws: web.WebSocketResponse) -> None:
+        old, self.panel = self.panel, ws
+        if old is not None and not old.closed:
+            await old.close(code=REPLACED_CLOSE_CODE, message=b"replaced by another panel")
+        log.info("panel (phone) online")
+        await self._tell_robot_about_pilots()
+        await self._tell_robot_about_panel()
+
+    async def detach_panel(self, ws: web.WebSocketResponse) -> None:
+        if self.panel is ws:
+            self.panel = None
+            log.info("panel (phone) offline")
+            self.rear_light = None
+            await self._broadcast({"type": "rear_light", "on": False, "available": False})
+            await self._tell_robot_about_panel()
+
+    async def _tell_robot_about_panel(self) -> None:
+        await _send(self.robot, {"type": "panel", "online": self.panel_online})
+
+    async def from_panel(self, msg: dict) -> None:
+        kind = msg.get("type")
+        if kind == "rtc":
+            # The rear camera goes to the robot page only; it passes the video on to the pilots.
+            if msg.get("to") == "robot":
+                await _send(self.robot, {"type": "rtc", "from": "panel", "data": msg.get("data")})
+        elif kind == "call":
+            log.info("someone at the robot is calling the owner")
+            await self._broadcast({"type": "call"})
+        elif kind == "volume":
+            await _send(self.robot, {"type": "volume", "delta": float(msg.get("delta", 0))})
+        elif kind == "light":
+            self.rear_light = {"type": "rear_light", "on": bool(msg.get("on")), "available": bool(msg.get("available"))}
+            await self._broadcast(self.rear_light)
+
+    async def rear_light_from_pilot(self, on: bool) -> None:
+        """The phone's camera light, to see behind the robot in the dark (e.g. backing onto the charger)."""
+        await _send(self.panel, {"type": "light", "on": bool(on)})
 
     # --- relay ---------------------------------------------------------------
 
@@ -98,6 +161,9 @@ class MediaHub:
         await _send(self.robot, {"type": "rtc", "from": pid, "data": data})
 
     async def from_robot(self, to: str, data: dict) -> None:
+        if to == "panel":
+            await _send(self.panel, {"type": "rtc", "from": "robot", "data": data})
+            return
         await _send(self.pilots.get(to), {"type": "rtc", "data": data})
 
     # --- brain ---------------------------------------------------------------
@@ -176,6 +242,8 @@ class MediaHub:
         """Bring a newly connected pilot up to date on the brain."""
         ws = self.pilots.get(pid)
         await _send(ws, {"type": "brain", "online": self.brain_online})
+        if self.panel_online and self.rear_light is not None:
+            await _send(ws, self.rear_light)
         if self.people is not None:
             await _send(ws, self.people)
 
@@ -185,7 +253,9 @@ class MediaHub:
 
     def snapshot(self) -> dict:
         return {"robot_online": self.robot is not None and not self.robot.closed,
+                "panel_online": self.panel_online,
                 "viewers": len(self.pilots),
+                "viewer_names": sorted(set(self.pilot_names.values())),
                 "brain_online": self.brain_online,
                 "frames_relayed": self.frames_relayed,
                 "frames_dropped": self.frames_dropped}

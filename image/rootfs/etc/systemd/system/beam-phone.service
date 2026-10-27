@@ -1,0 +1,14 @@
+[Unit]
+Description=Beam+ phone panel: an Android phone on USB as touch screen and rear camera (optional)
+After=beam-server.service
+
+[Service]
+# Own adb key and server: the phone asks once to allow this robot (USB debugging).
+StateDirectory=beam-phone
+Environment=HOME=/var/lib/beam-phone
+ExecStart=/usr/local/sbin/beam-setup phone
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

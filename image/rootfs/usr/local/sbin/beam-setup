@@ -8,6 +8,7 @@
   beam-setup backup      read-only image of the robot's internal disk           (once)
   beam-setup cameras     load camera firmware (copied from the internal disk)    (boot, camera plug-in)
   beam-setup display     display power follows sleep mode (floor lights too)    (always running)
+  beam-setup phone       an Android phone on USB as touch panel + rear camera   (always running)
 
 Progress for the person standing at the robot goes to /run/beam/setup.json,
 which the motor server passes to the robot screen.
@@ -127,6 +128,16 @@ def cmd_config() -> None:
                 secrets_saved.add("WIFI_PASSWORD")
         else:
             messages.append(f"Couldn't save Wi-Fi settings: {r.stderr.strip()}")
+    elif ssid:
+        # Password already saved: a new network name alone (e.g. the router's 5 GHz name) keeps it.
+        current = run("nmcli", "-g", "802-11-wireless.ssid", "connection", "show", "beam-wifi", check=False).stdout.strip()
+        if current and current != ssid:
+            r = run("nmcli", "connection", "modify", "beam-wifi", "802-11-wireless.ssid", ssid, check=False)
+            if r.returncode == 0:
+                log(f"Wi-Fi network changed from '{current}' to '{ssid}', same password")
+                run("nmcli", "connection", "up", "beam-wifi", check=False)
+            else:
+                messages.append(f"Couldn't change the Wi-Fi network: {r.stderr.strip()}")
     elif not ssid and run("nmcli", "-t", "-f", "NAME", "connection", "show", check=False).stdout.count("beam-wifi") == 0:
         messages.append("No Wi-Fi set up yet: put WIFI_SSID and WIFI_PASSWORD in beam.conf on the USB stick")
 
@@ -422,6 +433,97 @@ def cmd_display() -> None:
         time.sleep(2)
 
 
+# --- phone panel ---------------------------------------------------------------------
+
+def adb(*args: str, timeout: float = 15) -> str:
+    """adb with this service's own server and key (HOME=$STATE_DIRECTORY): independent of anyone's manual adb."""
+    try:
+        return run("adb", *args, check=False, timeout=timeout).stdout.replace("\r", "")
+    except subprocess.TimeoutExpired:
+        return ""
+
+
+def panel_url() -> str:
+    # Same token as the robot screen, if the server needs one.
+    token = ""
+    try:
+        token = KIOSK_URL.read_text().strip().partition("?")[2]
+    except OSError:
+        pass
+    return "http://localhost:8080/panel" + (f"?{token}" if token else "")
+
+
+def cmd_phone() -> None:
+    """Look after an Android phone plugged into the robot (USB debugging on, this robot allowed once):
+
+    - forward the robot's local port 8080 to the phone, so its Chrome reaches the server over the cable
+    - awake: keep the phone's screen on and Chrome showing the panel page (touch menu + rear camera)
+    - asleep: phone screen off (the panel page also closes the camera)
+    Nothing happens without a phone; it's an optional extra."""
+    os.environ.setdefault("ANDROID_ADB_SERVER_PORT", "5038")      # not the default port of a manual adb
+    url = panel_url()
+    shown = False                    # whether we've opened the panel since the phone was (re)connected
+    slept = False                    # whether we've put the phone's screen to sleep for this robot sleep
+    serial = None
+    battery_logged = 0.0
+    while True:
+        devices = [l.split() for l in adb("devices").splitlines()[1:] if l.strip()]
+        ready = [d[0] for d in devices if len(d) > 1 and d[1] == "device"]
+        if not ready:
+            if devices and serial != "waiting":
+                log(f"phone found but not ready ({devices[0][1]}): allow USB debugging on the phone")
+                serial = "waiting"
+            shown = False
+            time.sleep(5)
+            continue
+        if ready[0] != serial:
+            serial = ready[0]
+            shown = slept = False
+            log(f"phone {serial} connected")
+            adb("reverse", "tcp:8080", "tcp:8080")
+            adb("shell", "svc", "power", "stayon", "usb")              # screen stays on while on USB power
+            adb("shell", "settings", "put", "system", "screen_off_timeout", "1800000")
+        if "tcp:8080" not in adb("reverse", "--list"):
+            adb("reverse", "tcp:8080", "tcp:8080")
+        if time.monotonic() - battery_logged > 600:           # does the robot's USB port keep the phone charged?
+            battery_logged = time.monotonic()
+            b = dict(l.strip().split(": ", 1) for l in adb("shell", "dumpsys", "battery").splitlines() if ": " in l)
+            status = {"2": "charging", "3": "discharging", "4": "not charging", "5": "full"}.get(b.get("status", ""), "?")
+            temp = int(b.get("temperature", "0")) / 10
+            log(f"phone battery {b.get('level', '?')}% {status}, {temp:.1f} °C"
+                f"{', asleep' if asleep_now() else ''}")
+        screen_on = "mWakefulness=Awake" in adb("shell", "dumpsys", "power")
+        if asleep_now():
+            if not slept:
+                # Screen off once. A person can still wake it (power button) to tap Wake on the panel;
+                # then it goes dark again by itself after 30 s.
+                adb("shell", "svc", "power", "stayon", "false")
+                adb("shell", "settings", "put", "system", "screen_off_timeout", "30000")
+                if screen_on:
+                    adb("shell", "input", "keyevent", "KEYCODE_SLEEP")
+                log("asleep: phone screen off")
+                slept = True
+            shown = False
+        else:
+            if slept:
+                adb("shell", "svc", "power", "stayon", "usb")
+                adb("shell", "settings", "put", "system", "screen_off_timeout", "1800000")
+                slept = False
+            if not screen_on:
+                adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+                adb("shell", "wm", "dismiss-keyguard")
+            top = adb("shell", "dumpsys", "activity", "activities")
+            in_chrome = any("topResumedActivity" in l and "com.android.chrome" in l for l in top.splitlines())
+            if not shown or not in_chrome:
+                # A fixed application id makes Chrome reuse its panel tab instead of opening another one
+                # each time (a hidden older panel tab would compete for the panel role and the camera).
+                adb("shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url,
+                    "--es", "com.android.browser.application_id", "beam-panel", "com.android.chrome")
+                log(f"panel page opened on the phone ({url})")
+                shown = True
+        time.sleep(5)
+
+
 # --- audio ---------------------------------------------------------------------
 
 # Ported from Beam's cleveland_hda.sh. (nid, verb, param) for `hda-verb /dev/snd/hwC0D0`.
@@ -467,7 +569,8 @@ def cmd_audio() -> None:
 
 
 COMMANDS = {"firstboot": cmd_firstboot, "config": cmd_config, "tailscale": cmd_tailscale,
-            "audio": cmd_audio, "backup": cmd_backup, "cameras": cmd_cameras, "display": cmd_display}
+            "audio": cmd_audio, "backup": cmd_backup, "cameras": cmd_cameras, "display": cmd_display,
+            "phone": cmd_phone}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:

@@ -46,6 +46,17 @@
   .video video.inset { position: absolute; right: 12px; bottom: 12px; width: 26%; max-width: 240px; aspect-ratio: 4 / 3;
                        object-fit: cover; border-radius: 8px; border: 2px solid rgba(255,255,255,.35); background: #000;
                        cursor: pointer; z-index: 2; }
+  /* Rear view: the back camera of the phone on the robot (if there is one). Mirrored, like a car's. */
+  .video .rearwrap { position: absolute; right: 12px; top: 12px; width: 22%; max-width: 200px; z-index: 3; cursor: pointer; }
+  .video .rearwrap video { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 8px; transform: scaleX(-1);
+                           border: 2px solid var(--warn); background: #000; display: block; }
+  .video .rearwrap span { position: absolute; left: 6px; top: 4px; font-size: 11px; font-weight: 700; color: #fff;
+                          background: rgba(0,0,0,.55); padding: 1px 5px; border-radius: 4px; }
+  .video .rearwrap .lightbtn { position: absolute; right: 6px; bottom: 6px; border: 0; border-radius: 999px; padding: 4px 8px;
+                               font-size: 14px; cursor: pointer; background: rgba(0,0,0,.55); filter: grayscale(1); opacity: .8; }
+  .video .rearwrap .lightbtn.on { background: var(--warn); filter: none; opacity: 1; }
+  .video .rearwrap.big { inset: 0; width: auto; max-width: none; }
+  .video .rearwrap.big video { height: 100%; aspect-ratio: auto; object-fit: contain; border-radius: 0; }
   .video .hidden { display: none; }
   .vbtns { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 8px; z-index: 2; }
   .vbtn { border: 0; border-radius: 999px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer;
@@ -142,6 +153,7 @@
     </div>
     <video id="vidA" class="main hidden" autoplay muted playsinline></video>
     <video id="vidB" class="inset hidden" autoplay muted playsinline title="Click to swap cameras"></video>
+    <div id="rearWrap" class="rearwrap hidden" title="Rear view (the phone on the robot). Click to enlarge."><video id="vidRear" autoplay muted playsinline></video><span>REAR</span><button id="rearLight" class="lightbtn hidden" title="Rear light (the phone's flash)">💡</button></div>
     <div id="faces" class="faces"></div>
     <div id="aiBanner" class="ai-banner"><button id="aiTakeOver">Take over</button><span id="aiBannerText"></span><small id="aiBannerTask"></small></div>
     <audio id="robotAudio" autoplay></audio>
@@ -235,6 +247,8 @@
       if (m.type === "status") render(m);
       else if (m.type === "denied") flash(m.reason ? m.reason[0].toUpperCase() + m.reason.slice(1) : "Another driver has control", "warn");
       else if (m.type === "rtc") onRtc(m.data);
+      else if (m.type === "call") onCall();
+      else if (m.type === "rear_light") onRearLight(m);
       else if (m.type === "robot_online") rtcHello();
       else if (m.type === "rtc_unavailable") closeRtc("The robot's camera page isn't running");
       else if (m.type === "brain") onBrainState(m);
@@ -269,6 +283,9 @@
       if (mic) await audioSender.replaceTrack(mic.getAudioTracks()[0]);
       await pc.setLocalDescription(await pc.createAnswer());
       send({ type: "rtc", data: { kind: "answer", sdp: pc.localDescription } });
+      showRear(!!data.rear);
+    } else if (data.kind === "rear") {
+      showRear(!!data.on);
     } else if (data.kind === "ice" && pc) {
       try { await pc.addIceCandidate(data.candidate); } catch (e) { console.warn(e); }
     }
@@ -282,6 +299,7 @@
       a.play().catch(() => $("soundBtn").classList.remove("hidden"));
       return;
     }
+    if (stream && stream.id === streamIds.rear) { vidRear.srcObject = stream; return; }
     const isNav = stream && stream.id === streamIds.nav;
     const el = (isNav !== swapped) ? vidB : vidA;
     el.srcObject = stream || new MediaStream([e.track]);
@@ -290,6 +308,38 @@
   }
 
   window.beamDebug = () => pc && { connection: pc.connectionState, ice: pc.iceConnectionState, streams: streamIds };
+
+  // ---------- rear view: the phone on the robot, passed on by the robot page as a third video ----------
+  const rearWrap = $("rearWrap"), vidRear = $("vidRear");
+  function showRear(on) { rearWrap.classList.toggle("hidden", !on); }
+  rearWrap.addEventListener("click", () => rearWrap.classList.toggle("big"));
+  // The phone's flash as a light behind the robot (e.g. backing onto the charger in the dark).
+  const rearLight = $("rearLight");
+  let rearLightOn = false;
+  rearLight.addEventListener("click", (e) => { e.stopPropagation(); send({ type: "rear_light", on: !rearLightOn }); });
+  function onRearLight(m) {
+    rearLightOn = !!m.on;
+    rearLight.classList.toggle("hidden", !m.available);
+    rearLight.classList.toggle("on", rearLightOn);
+    rearLight.title = rearLightOn ? "Rear light is on: click to turn it off" : "Rear light (the phone's flash)";
+  }
+
+  // ---------- "Call owner" pressed on the phone on the robot ----------
+  let callTitleTimer = null;
+  function onCall() {
+    flash("🔔 Someone at the robot is calling you", "info", 15000);
+    try {                                         // a short two-tone chime
+      const ac = new AudioContext(), t = ac.currentTime;
+      for (const [f, at] of [[880, 0], [660, 0.25], [880, 0.6], [660, 0.85]]) {
+        const o = ac.createOscillator(), g = ac.createGain();
+        o.frequency.value = f; g.gain.setValueAtTime(0.2, t + at); g.gain.exponentialRampToValueAtTime(0.001, t + at + 0.22);
+        o.connect(g).connect(ac.destination); o.start(t + at); o.stop(t + at + 0.25);
+      }
+    } catch (e) { /* no audio until the page has been clicked once */ }
+    const title = document.title; let n = 0;
+    clearInterval(callTitleTimer);
+    callTitleTimer = setInterval(() => { document.title = (n++ % 2) ? title : "🔔 Calling you"; if (n > 20) { clearInterval(callTitleTimer); document.title = title; } }, 700);
+  }
 
   // ---------- brain: face boxes, naming, people list ----------
   let lastFaces = null, brainOnline = false, brainPaused = false;
@@ -393,6 +443,7 @@
     if (pc) { pc.close(); pc = null; }
     audioSender = null;
     for (const v of [vidA, vidB]) { v.srcObject = null; v.classList.add("hidden"); }
+    vidRear.srcObject = null; showRear(false);
     $("robotAudio").srcObject = null;
     if (reason) {
       $("placeholder").classList.remove("hidden");

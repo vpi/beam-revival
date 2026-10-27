@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Beam+ Panel</title>
+<style>
+  /* The phone mounted on the robot (beam-setup phone). A touch screen for people in the room, and its back
+     camera is the driver's rear view. Always dark: it faces a room. No driving controls on purpose. */
+  :root { --bg: #0d1014; --card: #161b22; --text: #e9edf2; --muted: #8d97a5; --line: #262c34;
+          --ok: #39c477; --warn: #e2a72e; --bad: #f05d5d; --accent: #5a92f0; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 17px/1.35 system-ui, -apple-system, Roboto, sans-serif; overflow: hidden; }
+  body { display: flex; flex-direction: column; padding: 20px 16px calc(16px + env(safe-area-inset-bottom)); gap: 14px; }
+  .head { text-align: center; padding-top: 4px; }
+  .eyes { display: flex; gap: 34px; justify-content: center; margin-bottom: 14px; }
+  .eye { width: 34px; height: 34px; border-radius: 50%; background: var(--text); animation: blink 6s infinite; }
+  @keyframes blink { 0%, 96%, 100% { transform: scaleY(1); } 98% { transform: scaleY(.1); } }
+  body.live .eye { background: var(--ok); }
+  h1 { font-size: 26px; margin: 0; font-weight: 700; }
+  .sub { color: var(--muted); margin-top: 4px; min-height: 1.35em; }
+  .privacy { border-radius: 14px; padding: 12px 14px; text-align: center; font-weight: 600; background: var(--card);
+             border: 1px solid var(--line); }
+  .privacy.watching { background: #3a2a0c; border-color: var(--warn); color: #ffd98a; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: auto; }
+  button { font: inherit; font-weight: 700; color: var(--text); background: var(--card); border: 1px solid var(--line);
+           border-radius: 16px; padding: 20px 10px; font-size: 19px; touch-action: manipulation; }
+  button:active { transform: scale(.97); }
+  button:disabled { opacity: .45; }
+  .call { grid-column: span 2; background: var(--accent); border-color: var(--accent); color: #fff; font-size: 23px; padding: 26px 10px; }
+  .wide { grid-column: span 2; }
+  .row { display: flex; justify-content: space-between; color: var(--muted); font-size: 15px; padding: 0 4px; }
+  .note { text-align: center; color: var(--muted); min-height: 1.35em; font-size: 15px; }
+  .offline { color: var(--bad); }
+  /* Asleep: almost nothing on screen (the robot also turns the phone's screen off). */
+  .sleep { position: fixed; inset: 0; background: #000; display: none; flex-direction: column; align-items: center;
+           justify-content: center; gap: 22px; z-index: 5; color: var(--muted); text-align: center; padding: 24px; }
+  body.asleep .sleep { display: flex; }
+  .sleep button { width: 70%; }
+  .start { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; align-items: center; justify-content: center;
+           z-index: 6; font-size: 22px; font-weight: 700; text-align: center; padding: 30px; }
+  body.needtap .start { display: flex; }
+</style>
+</head>
+<body class="needtap">
+  <div class="head">
+    <div class="eyes"><div class="eye"></div><div class="eye"></div></div>
+    <h1 id="title">Beam</h1>
+    <div class="sub" id="sub">Connecting…</div>
+  </div>
+  <div class="privacy" id="privacy">📷 Nobody is watching</div>
+  <div class="row"><span id="battery">battery —</span><span id="rear">rear camera off</span></div>
+
+  <div class="grid">
+    <button class="call" id="callBtn">🔔 Call owner</button>
+    <button id="volDown" aria-label="Quieter">🔉 Quieter</button>
+    <button id="volUp" aria-label="Louder">🔊 Louder</button>
+    <button class="wide" id="sleepBtn">😴 Sleep</button>
+  </div>
+  <div class="note" id="note"></div>
+
+  <div class="sleep">
+    <div style="font-size:42px">😴</div>
+    <div>Beam is asleep.<br>Cameras and microphone are off.</div>
+    <button id="wakeBtn">☀️ Wake up</button>
+  </div>
+  <div class="start" id="start">Tap to start</div>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const token = params.get("token");
+  const q = token ? "&token=" + encodeURIComponent(token) : "";
+  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?role=panel${q}`;
+  const ICE = { iceServers: [] };
+
+  let ws = null, last = null, asleep = false, camera = null, noteTimer = null;
+  const peers = new Map();                          // pilot id -> RTCPeerConnection (rear camera out)
+
+  // Full screen needs a tap the first time (browsers don't allow it otherwise).
+  $("start").addEventListener("click", () => {
+    document.body.classList.remove("needtap");
+    document.documentElement.requestFullscreen?.().catch(() => {});
+  });
+
+  function send(m) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); }
+  function note(text, ms = 5000) { $("note").textContent = text; clearTimeout(noteTimer); noteTimer = setTimeout(() => $("note").textContent = "", ms); }
+
+  // ---------- buttons ----------
+  $("callBtn").addEventListener("click", () => {
+    send({ type: "call" });
+    const watchers = last && last.media ? last.media.viewers : 0;
+    note(watchers ? "🔔 Calling… they've been notified." : "Nobody is connected right now.", 6000);
+    $("callBtn").disabled = true; setTimeout(() => $("callBtn").disabled = false, 8000);
+  });
+  $("volDown").addEventListener("click", () => send({ type: "volume", delta: -0.1 }));
+  $("volUp").addEventListener("click", () => send({ type: "volume", delta: +0.1 }));
+  $("sleepBtn").addEventListener("click", () => send({ type: "sleep" }));
+  $("wakeBtn").addEventListener("click", () => { send({ type: "wake" }); $("wakeBtn").textContent = "Waking up…"; });
+
+  // ---------- rear camera (back camera of the phone) ----------
+  async function openCamera() {
+    if (camera || asleep) return camera;
+    camera = await navigator.mediaDevices.getUserMedia({
+      // Small and slow on purpose: the robot re-encodes it for every driver, next to its own two cameras.
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 10, max: 10 } },
+      audio: false,
+    });
+    reportLight();
+    return camera;
+  }
+  function closeCamera() {
+    if (camera) camera.getTracks().forEach((t) => t.stop());
+    camera = null;
+    light = false;                             // the light goes off with the camera
+    reportLight();
+  }
+
+  // ---------- rear light: the camera's flash as a torch, switched by the driver ----------
+  let light = false;
+  function cameraTrack() { return camera && camera.getVideoTracks()[0]; }
+  function lightAvailable() { const t = cameraTrack(); return !!(t && t.getCapabilities && t.getCapabilities().torch); }
+  async function setLight(on) {
+    light = false;
+    if (lightAvailable()) {
+      try { await cameraTrack().applyConstraints({ advanced: [{ torch: !!on }] }); light = !!on; } catch (e) { /* stays off */ }
+    }
+    reportLight();
+  }
+  function reportLight() {
+    send({ type: "light", on: light, available: lightAvailable() });
+    $("rear").textContent = !camera ? "rear camera off" : light ? "rear camera on · light on" : "rear camera on";
+  }
+  function closePeer(id) {
+    const pc = peers.get(id);
+    if (pc) { peers.delete(id); pc.close(); }
+    if (!peers.size) closeCamera();            // nobody watching: the camera is closed, not just unused
+  }
+  async function onRtc(from, data) {
+    if (data.kind === "hello") {
+      if (asleep) return;
+      closePeer(from);
+      let stream;
+      try { stream = await openCamera(); }
+      catch (e) { note("Rear camera unavailable: " + e.message, 8000); return; }
+      const pc = new RTCPeerConnection(ICE);
+      peers.set(from, pc);
+      for (const t of stream.getVideoTracks()) pc.addTrack(t, stream);
+      pc.onicecandidate = (e) => e.candidate && send({ type: "rtc", to: from, data: { kind: "ice", candidate: e.candidate } });
+      pc.onconnectionstatechange = () => { if (["failed", "closed"].includes(pc.connectionState)) closePeer(from); };
+      await pc.setLocalDescription(await pc.createOffer());
+      send({ type: "rtc", to: from, data: { kind: "offer", sdp: pc.localDescription } });
+      return;
+    }
+    if (data.kind === "bye") return closePeer(from);
+    const pc = peers.get(from);
+    if (!pc) return;
+    if (data.kind === "answer") await pc.setRemoteDescription(data.sdp);
+    else if (data.kind === "ice") { try { await pc.addIceCandidate(data.candidate); } catch (e) { /* stale */ } }
+  }
+
+  // ---------- state from the server ----------
+  const joinNames = (a) => a.length <= 1 ? (a[0] || "") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1];
+  function render(s) {
+    last = s;
+    const sleeping = !!(s.sleep && s.sleep.asleep);
+    if (sleeping && !asleep) { asleep = true; for (const id of [...peers.keys()]) closePeer(id); closeCamera(); }
+    if (!sleeping && asleep) { asleep = false; $("wakeBtn").textContent = "☀️ Wake up"; }
+    document.body.classList.toggle("asleep", sleeping);
+
+    const M = s.media || {}, B = s.board || {};
+    const names = M.viewer_names || [];
+    const n = M.viewers || 0;
+    const who = names.length ? joinNames(names) : n === 1 ? "Someone" : `${n} people`;
+    document.body.classList.toggle("live", n > 0);
+    $("sub").textContent = n ? `${who} ${n > 1 ? "are" : "is"} connected` : "Nobody is connected";
+    $("sub").classList.remove("offline");
+    const p = $("privacy");
+    p.className = "privacy" + (n ? " watching" : "");
+    p.textContent = n ? `📷 Camera on · ${who} can see and hear you` : "📷 Nobody is watching";
+    $("battery").textContent = B.battery_percent != null ? `battery ${B.battery_percent.toFixed(0)}%${B.charging ? " · charging" : ""}` : "battery —";
+  }
+
+  function connect() {
+    ws = new WebSocket(wsUrl);
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "status") render(m);
+      else if (m.type === "rtc") onRtc(m.from, m.data);
+      else if (m.type === "light") setLight(m.on);
+    };
+    ws.onclose = (ev) => {
+      for (const id of [...peers.keys()]) closePeer(id);
+      $("sub").textContent = "Robot not reachable"; $("sub").classList.add("offline");
+      if (ev.code !== 4000) setTimeout(connect, 1500);      // 4000: another panel took over
+    };
+    ws.onerror = () => ws.close();
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

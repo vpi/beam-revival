@@ -84,6 +84,15 @@
   const peers = new Map();                     // pilot id -> { pc, audio }
   let ws = null, media = null;
   let asleep = false;
+  // Speaker volume for the driver's voice and spoken messages, set from the panel (phone) buttons.
+  let volume = 1;
+  try { volume = Math.min(1, Math.max(0.1, parseFloat(localStorage.getItem("volume")) || 1)); } catch (e) { /* no storage */ }
+  function setVolume(delta) {
+    volume = Math.min(1, Math.max(0.1, Math.round((volume + delta) * 10) / 10));
+    try { localStorage.setItem("volume", String(volume)); } catch (e) { /* fine */ }
+    for (const p of peers.values()) if (p.audio) p.audio.volume = volume;
+    showBubble(`🔊 Volume ${Math.round(volume * 100)}%`, 1500);
+  }
 
   // ---------- local media ----------
   async function getMedia() {
@@ -93,9 +102,13 @@
     probe.getTracks().forEach((t) => t.stop());
     const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
     const pick = (hint, fallback) => (hint && cams.find((c) => c.label.toLowerCase().includes(hint.toLowerCase()))) || fallback;
-    // Beam+ cameras by USB id (from Beam's udev rules); Chrome on Linux appends "(vid:pid)" to labels.
-    const headCam = pick(params.get("head") || "25a1:0006", cams[0]);
-    const navCam = pick(params.get("nav") || "25a1:0007", cams.find((c) => c !== headCam));
+    // Beam+ cameras by USB id, when Chrome appends "(vid:pid)" to labels. The robot's Chromium doesn't
+    // (both are just "M034-WDR"), so otherwise go by the server's list of roles in device order.
+    let roles = [];
+    try { roles = (await fetch("/api/status" + (q ? "?" + q : "")).then((r) => r.json())).cameras || []; } catch (e) { /* guess */ }
+    const byRole = (role) => (roles.length === cams.length ? cams[roles.indexOf(role)] : undefined);
+    const headCam = pick(params.get("head") || "25a1:0006", byRole("head") || cams[0]);
+    const navCam = pick(params.get("nav") || "25a1:0007", byRole("nav") || cams.find((c) => c !== headCam));
 
     const head = await navigator.mediaDevices.getUserMedia({
       video: { deviceId: { exact: headCam.deviceId }, width: 640, height: 480, frameRate: 30 },
@@ -109,7 +122,7 @@
         });
       } catch (e) { console.warn("nav camera unavailable", e); }
     }
-    return { head, nav, labels: { head: headCam.label, nav: navCam ? navCam.label : null } };
+    return { head, nav, labels: { head: cams.indexOf(headCam), nav: cams.indexOf(navCam), roles, all: cams.map((c) => c.label) } };
   }
 
   // Test mode: animated test patterns and a beeping tone instead of real devices.
@@ -182,25 +195,62 @@
     for (const t of media.head.getTracks()) pc.addTrack(t, media.head);   // head video + mic (sendrecv audio)
     if (media.nav) for (const t of media.nav.getVideoTracks()) pc.addTrack(t, media.nav);
     if (!media.head.getAudioTracks().length) pc.addTransceiver("audio", { direction: "recvonly" });
+    // Rear view slot, always negotiated: the phone's camera is switched in and out without renegotiating.
+    peer.rear = pc.addTransceiver("video", { direction: "sendonly", streams: [rearStream],
+                                             sendEncodings: [{ maxFramerate: 10, maxBitrate: 300000 }] });
+    if (rearTrack) peer.rear.sender.replaceTrack(rearTrack);
 
     pc.onicecandidate = (e) => e.candidate && sendTo(id, { kind: "ice", candidate: e.candidate });
     pc.ontrack = (e) => {
       if (e.track.kind !== "audio") return;
       peer.audio = new Audio();
       peer.audio.srcObject = new MediaStream([e.track]);
+      peer.audio.volume = volume;
       playAudio(peer.audio);
     };
     pc.onconnectionstatechange = () => {
       if (["failed", "closed"].includes(pc.connectionState)) closePeer(id);
+      if (pc.connectionState === "connected") setTimeout(() => reportVideo(pc), 20000);
       render();
     };
     await pc.setLocalDescription(await pc.createOffer());
-    sendTo(id, { kind: "offer", sdp: pc.localDescription,
-                 streams: { head: media.head.id, nav: media.nav ? media.nav.id : null } });
+    sendTo(id, { kind: "offer", sdp: pc.localDescription, rear: !!rearTrack,
+                 streams: { head: media.head.id, nav: media.nav ? media.nav.id : null, rear: rearStream.id } });
     render();
+    updateRear();
+  }
+
+  // Once per driver, 20 s in: what each video is captured at and actually sent at, and why (logged by
+  // the server). The encoder lowers resolution on its own when it's short of CPU or bandwidth.
+  async function reportVideo(pc) {
+    if (pc.connectionState !== "connected" || !ws || ws.readyState !== 1) return;
+    const out = [], stats = await pc.getStats();
+    stats.forEach((s) => {
+      if (s.type === "candidate-pair" && s.nominated && s.state === "succeeded") {
+        const local = stats.get(s.localCandidateId), remote = stats.get(s.remoteCandidateId);
+        out.push({ path: `${local && local.address} -> ${remote && remote.address} (${local && local.protocol})`,
+                   rtt_ms: Math.round((s.currentRoundTripTime || 0) * 1000),
+                   available_kbps: Math.round((s.availableOutgoingBitrate || 0) / 1000) });
+      }
+      if (s.type === "remote-inbound-rtp" && s.kind === "video") {
+        out.push({ lost: s.packetsLost, fraction_lost: s.fractionLost, rtt_ms: Math.round((s.roundTripTime || 0) * 1000) });
+      }
+      if (s.type === "outbound-rtp" && s.kind === "video") {
+        out.push({ mid: s.mid, sent: `${s.frameWidth}x${s.frameHeight}@${Math.round(s.framesPerSecond || 0)}`,
+                   kbps: Math.round((s.targetBitrate || 0) / 1000), limit: s.qualityLimitationReason,
+                   durations: s.qualityLimitationDurations, encoder: s.encoderImplementation });
+      }
+    });
+    const cap = {};
+    for (const [name, s] of [["head", media && media.head], ["nav", media && media.nav]]) {
+      const t = s && s.getVideoTracks()[0];
+      if (t) { const g = t.getSettings(); cap[name] = `${g.width}x${g.height}@${Math.round(g.frameRate || 0)}`; }
+    }
+    ws.send(JSON.stringify({ type: "video_stats", captured: cap, sent: out }));
   }
 
   async function onRtc(from, data) {
+    if (from === "panel") return onPhoneRtc(data);
     if (data.kind === "hello") return onHello(from);
     if (data.kind === "bye") return closePeer(from);
     const peer = peers.get(from);
@@ -216,6 +266,62 @@
     if (peer.audio) peer.audio.srcObject = null;
     peer.pc.close();
     render();
+    updateRear();
+  }
+
+  // ---------- rear view: the phone on the robot (panel) ----------
+  // The phone is only on the home Wi-Fi, and drivers often come in over Tailscale, so they can't reach
+  // it. It sends its back camera here instead (over the LAN), and we add it to every driver's
+  // connection as a third video. Asked for only while someone is connected: otherwise it stays closed.
+  const rearStream = new MediaStream();        // its id tells drivers which video is the rear view
+  let panelOnline = false, phone = null, rearTrack = null;   // phone: { pc, asked } while we want it
+
+  function rearWanted() { return panelOnline && !asleep && peers.size > 0; }
+  function updateRear() {
+    if (!rearWanted()) { if (phone) closePhone(true); return; }
+    // (Re)ask when there's no connection yet, or the phone didn't answer within 10 s.
+    if (!phone || (!phone.pc && Date.now() - phone.asked > 10000)) {
+      if (phone) closePhone(false);
+      phone = { pc: null, asked: Date.now() };
+      sendTo("panel", { kind: "hello" });
+    }
+  }
+  setInterval(updateRear, 5000);
+
+  async function onPhoneRtc(data) {
+    if (data.kind === "offer" && phone) {
+      if (phone.pc) phone.pc.close();
+      const pc = new RTCPeerConnection(ICE);
+      phone.pc = pc;
+      pc.onicecandidate = (e) => e.candidate && sendTo("panel", { kind: "ice", candidate: e.candidate });
+      pc.ontrack = (e) => setRearTrack(e.track);
+      pc.onconnectionstatechange = () => {
+        if (phone && phone.pc === pc && ["failed", "closed"].includes(pc.connectionState)) {
+          closePhone(true); updateRear();
+        }
+      };
+      await pc.setRemoteDescription(data.sdp);
+      await pc.setLocalDescription(await pc.createAnswer());
+      sendTo("panel", { kind: "answer", sdp: pc.localDescription });
+    } else if (data.kind === "ice" && phone && phone.pc) {
+      try { await phone.pc.addIceCandidate(data.candidate); } catch (e) { /* stale */ }
+    }
+  }
+
+  function closePhone(sayBye) {
+    if (sayBye) sendTo("panel", { kind: "bye" });
+    if (phone && phone.pc) phone.pc.close();
+    phone = null;
+    setRearTrack(null);
+  }
+
+  function setRearTrack(track) {
+    if (track === rearTrack) return;
+    rearTrack = track;
+    for (const [id, p] of peers) {
+      p.rear.sender.replaceTrack(track).catch(() => {});
+      sendTo(id, { kind: "rear", on: !!track });
+    }
   }
 
   function playAudio(el) {
@@ -231,12 +337,15 @@
   function sendTo(to, data) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "rtc", to, data })); }
   function connect() {
     ws = new WebSocket(wsUrl);
-    ws.onopen = () => { $("srvDot").className = "dot ok"; $("srvText").textContent = "server"; render(); };
+    ws.onopen = () => {
+      $("srvDot").className = "dot ok"; $("srvText").textContent = "server"; render();
+      if (media) ws.send(JSON.stringify({ type: "cameras", ...media.labels }));   // which camera became which view (logged)
+    };
     ws.onclose = (ev) => {
       for (const id of [...peers.keys()]) closePeer(id);
       setFrameRate(0);
       $("brainInd").classList.remove("on");
-      seenNames = []; pilotNames = {};
+      seenNames = []; pilotNames = {}; panelOnline = false;
       if (ev.code === 4000) {
         // Another robot screen took over (see signaling.REPLACED_CLOSE_CODE). Reconnecting
         // would knock that one off in turn, so stand down until reloaded.
@@ -264,6 +373,8 @@
       else if (m.type === "ai") showAi(m);
       else if (m.type === "pilots") { pilotNames = m.names || {}; render(); }
       else if (m.type === "show") showBubble(m.text, (m.seconds || 5) * 1000);
+      else if (m.type === "volume") setVolume(m.delta || 0);
+      else if (m.type === "panel") { panelOnline = !!m.online; if (!panelOnline && phone) closePhone(false); updateRear(); }
     };
   }
 
@@ -315,6 +426,7 @@
     if (m.text) showBubble(ai ? `🤖 AI: ${m.text}` : m.text, 6000, ai);
     if (!m.wav) return;
     const a = new Audio("data:audio/wav;base64," + m.wav);
+    a.volume = volume;
     a.play().catch(() => {});                // kiosk autoplay is allowed; elsewhere it may be blocked
   }
 
