@@ -7,6 +7,9 @@
 # The STABLE stick only takes clean release tags (git checkout v1.0 first); new work goes to the lab
 # stick. --force-stable overrides that. The deployed version is written to /opt/beam-revival/VERSION.
 #
+# Debian packages from image/packages.txt that the stick doesn't have yet (a stick built before a
+# release added one) are installed first, which needs the robot online; if that fails, nothing changes.
+#
 # Restarts the motor server (a second or two without drive commands; the power watchdog is refreshed
 # again as soon as it's back) and the robot screen.
 set -euo pipefail
@@ -32,10 +35,19 @@ echo "deploying $VERSION to $TARGET ($VARIANT stick)"
 
 STAMP=$(mktemp -d); trap 'rm -rf "$STAMP"' EXIT
 echo "$VERSION" > "$STAMP/VERSION"
-tar -C "$PROJECT" -czf - --exclude=__pycache__ beamctl docs README.md -C image rootfs -C "$STAMP" VERSION \
+tar -C "$PROJECT" -czf - --exclude=__pycache__ beamctl docs README.md -C image rootfs packages.txt -C "$STAMP" VERSION \
   | ssh "$@" "$TARGET" 'set -euo pipefail
       STAGE=$(mktemp -d); trap "rm -rf $STAGE" EXIT
       tar -xzf - -C "$STAGE"
+      MISSING=""
+      for p in $(sed "s/#.*//" "$STAGE/packages.txt"); do
+        dpkg-query -W -f="\${Status}" "$p" 2>/dev/null | grep -q "install ok installed" || MISSING="$MISSING $p"
+      done
+      if [ -n "$MISSING" ]; then
+        echo "installing packages this release needs:$MISSING"
+        sudo apt-get update -qq
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $MISSING >/dev/null
+      fi
       sudo cp "$STAGE/VERSION" /opt/beam-revival/VERSION
       sudo cp -a /opt/beam-revival/beamctl "/var/tmp/beamctl.bak.$(date +%Y%m%d-%H%M%S)"
       sudo rm -rf /opt/beam-revival/beamctl

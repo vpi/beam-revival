@@ -4,7 +4,7 @@ Optional. A spare Android phone, mounted on the robot below the screen and plugg
 USB port, becomes:
 
 - **a touch screen for people in the room** (the Beam+ screen isn't touch): who's connected, a clear
-  "camera on" warning, **Call owner**, speaker **volume**, and **Sleep / Wake**. There are no driving
+  "camera on" warning, **Call owner**, **volume** for drivers' voices and, separately, for Rocky's (his goes up to 250%), a switch for Rocky's **listening**, and **Sleep / Wake**. There are no driving
   controls on it on purpose: only the remote driver drives.
 - **a rear camera**: its back camera looks behind the robot, which has none of its own. Drivers see it
   as a mirrored **REAR** picture at the top right of the video; click it to enlarge it. The 💡 button

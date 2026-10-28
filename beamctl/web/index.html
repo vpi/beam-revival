@@ -93,13 +93,20 @@
   .ai-banner.on { display: block; }
   .ai-banner button { float: right; border: 0; border-radius: 6px; padding: 4px 10px; font: inherit; font-weight: 700;
                       background: #fff; color: var(--ai); cursor: pointer; }
-  #aiCard textarea, #aiCard select { width: 100%; box-sizing: border-box; font: inherit; color: var(--text);
+  #aiCard textarea, #aiCard select, #rockyVoice { width: 100%; box-sizing: border-box; font: inherit; color: var(--text);
                       background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
   #aiCard textarea { resize: vertical; min-height: 54px; margin: 6px 0; }
   .aibtn { border: 0; border-radius: 6px; padding: 6px 12px; font: inherit; font-weight: 700; cursor: pointer;
            background: var(--ai); color: #fff; }
   .ailog { font-size: 12px; color: var(--muted); max-height: 140px; overflow: auto; margin-top: 6px; }
   .ailog div { padding: 2px 0; border-bottom: 1px dashed var(--line); }
+  .rockyform { display: flex; gap: 6px; margin: 6px 0; }
+  .rockyform input { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--bg);
+                     border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+  .rockylog { max-height: 220px; }
+  #rockyVoiceRow { align-items: center; } #rockyVoice { width: auto; flex: 1; margin-left: 8px; }
+  .rockylog b { color: var(--text); font-weight: 600; }
+  .rockylog .rocky { color: var(--ai); }
   .dot.ai { background: var(--ai); }
   .banner {
     position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
@@ -207,6 +214,19 @@
       <div class="ailog" id="aiLog"></div>
     </div>
 
+    <div class="card hiddenCard" id="rockyCard">
+      <h2>🤖 Talk to Rocky (AI)</h2>
+      <form id="rockyForm" class="rockyform">
+        <input id="rockyText" maxlength="500" autocomplete="off" placeholder="e.g. Rocky, what is a weekend?">
+        <button class="aibtn" id="rockySend">Say</button>
+      </form>
+      <div class="row hiddenCard" id="rockyVoiceRow"><span>Voice</span>
+        <select id="rockyVoice"><option value="piper">Piper (local)</option><option value="fish">Fish Audio Rocky (cloud)</option></select>
+      </div>
+      <p class="help">Rocky answers out loud in the room, with his face on the robot screen. What you type goes to the AI service; with the Fish voice, his reply also goes to Fish Audio.</p>
+      <div class="ailog rockylog" id="rockyLog"></div>
+    </div>
+
     <div class="card hiddenCard" id="peopleCard">
       <h2>People</h2>
       <div class="row"><span>Face recognition</span><span id="frState">—</span></div>
@@ -256,6 +276,8 @@
       else if (m.type === "people") renderPeople(m.people || []);
       else if (m.type === "notice") flash(m.text, "info", 4000);
       else if (m.type === "ai") onAi(m);
+      else if (m.type === "rocky") onRocky(m);
+      else if (m.type === "rocky_voice") onRockyVoice(m);
     };
   }
 
@@ -369,9 +391,46 @@
   $("aiStop").addEventListener("click", stopAi);
   $("aiTakeOver").addEventListener("click", () => { stopAi(); send({ type: "stop" }); });
 
+  // ---------- Rocky: typed chat, spoken in the room ----------
+  $("rockyForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = $("rockyText").value.trim();
+    if (!text) return;
+    send({ type: "brain", data: { kind: "chat", text } });
+    $("rockyText").value = "";
+  });
+  function onRocky(m) {
+    const log = $("rockyLog"), entry = document.createElement("div");
+    const you = document.createElement("b");
+    you.textContent = `${m.sender || "Someone"}: `;
+    entry.append(you, m.heard || "", document.createElement("br"));
+    const reply = document.createElement("span");
+    reply.className = "rocky";
+    reply.textContent = `Rocky (${m.emotion}): ${m.text}`;
+    entry.append(reply);
+    if (m.voice) {
+      const how = document.createElement("small");
+      how.textContent = ` · ${m.voice === "fish" ? "Fish" : "Piper"} voice, ${m.tts_s} s`;
+      entry.append(how);
+    }
+    log.prepend(entry);
+    while (log.children.length > 30) log.lastChild.remove();
+  }
+
+  // The switch only shows when the brain has a Fish Audio key; it's shared by every driver.
+  function onRockyVoice(m) {
+    $("rockyVoiceRow").classList.toggle("hiddenCard", !(m.available || []).includes("fish"));
+    $("rockyVoice").value = m.voice;
+  }
+  $("rockyVoice").addEventListener("change", () => {
+    send({ type: "brain", data: { kind: "voice", voice: $("rockyVoice").value } });
+    $("rockyVoice").blur();       // back to driving keys
+  });
+
   function onBrainState(m) {
     brainOnline = !!m.online;
     brainPaused = !!m.paused;
+    $("rockyCard").classList.toggle("hiddenCard", !brainOnline);
     $("peopleCard").classList.toggle("hiddenCard", !brainOnline);
     $("aiCard").classList.toggle("hiddenCard", !brainOnline);
     $("frState").textContent = !brainOnline ? "off" : brainPaused ? "paused" : "on";
@@ -481,7 +540,10 @@
 
   const KEYMAP = { KeyW: [1, 0], ArrowUp: [1, 0], KeyS: [-1, 0], ArrowDown: [-1, 0],
                    KeyA: [0, 1], ArrowLeft: [0, 1], KeyD: [0, -1], ArrowRight: [0, -1] };
+  // Typing in a text box (AI task, Rocky chat) mustn't drive the robot or hit STOP.
+  const typing = (e) => e.target instanceof HTMLElement && e.target.matches("textarea, select, input:not([type=range])");
   addEventListener("keydown", (e) => {
+    if (typing(e)) return;
     if (e.code === "Space") { e.preventDefault(); setEstop(true); return; }
     if (KEYMAP[e.code]) { e.preventDefault(); keys.add(e.code); updateKb(); }
   });

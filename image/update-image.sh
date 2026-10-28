@@ -22,6 +22,12 @@ chmod 755 "$MNT/usr/local/sbin/beam-setup" "$MNT/usr/local/bin/beam-kiosk"
 for unit in "$HERE"/rootfs/etc/systemd/system/beam-*.service; do      # units added since the build
   chroot "$MNT" systemctl enable -q "$(basename "$unit")"
 done
+MISSING=""
+for p in $(sed 's/#.*//' "$HERE/packages.txt"); do
+  chroot "$MNT" dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || MISSING="$MISSING $p"
+done
+[ -z "$MISSING" ] || echo "WARNING: this image lacks packages the code now needs:$MISSING. Rebuild it with build-image.sh," \
+  "or install them on the robot with scripts/deploy-robot.sh after writing the stick." >&2
 umount "$MNT"
 rm -f "$IMG.xz"
 xz -T0 -6 -k "$IMG"

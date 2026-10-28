@@ -32,8 +32,11 @@ Tested on a real Beam+ (October 2026), running from a USB stick, with the robot'
   remotely from the driving page
 - Optional **phone panel**: a spare Android phone on the robot becomes a touch screen for people in
   the room, a rear camera with a light, and a "Call owner" button ([docs/phone.md](docs/phone.md))
-- Experimental, so far only tried against the simulator: face recognition with spoken greetings, and AI
-  driving ([docs/brain.md](docs/brain.md))
+- Experimental, on a separate Linux computer (the "brain"): **face recognition** with spoken greetings
+  ([docs/brain.md](docs/brain.md)), and **Rocky**, a personality with an animated face on the robot screen
+  who answers out loud, typed to by drivers or spoken to in the room with "hey Rocky"
+  ([docs/rocky.md](docs/rocky.md)). Both tried on a Beam+. AI driving so far only in the simulator
+  ([docs/ai-driving.md](docs/ai-driving.md))
 
 Not tested: the BeamPro (it uses the same motor board protocol, so it may work).
 
@@ -90,18 +93,20 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 | Sleep mode (button) | **core**, tested | – | always available |
 | Nightly sleep schedule | optional, tested | – | `SLEEP_HOURS`, `TIMEZONE` in `beam.conf` |
 | Phone panel: touch screen for people in the room, rear camera and light, Call owner | optional, tested | a spare Android phone (USB-C, Chrome) | plug it in, see [docs/phone.md](docs/phone.md) |
-| Face recognition and spoken greetings | **experimental** | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
+| Face recognition and spoken greetings | **experimental**, tried on a Beam+ | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
+| Rocky: animated face, typed chat from drivers, "hey Rocky" in the room (only while nobody drives) | **experimental**, tried on a Beam+ | the brain, an AI provider API key; optional Fish Audio key for his voice | see [docs/rocky.md](docs/rocky.md) |
 | AI driving | **experimental**, simulator only so far | the brain, plus an AI provider API key | see [docs/ai-driving.md](docs/ai-driving.md) |
 
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.2` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.3` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one
 (`build-image.sh --variant lab`, robot name `beam-lab`) for new features. `scripts/deploy-robot.sh`
-refuses to update a stable stick with anything but a clean release tag.
+refuses to update a stable stick with anything but a clean release tag. It also installs any Debian
+package a newer release needs (the list is `image/packages.txt`), so the robot must be online.
 
 ## What's in here
 
@@ -115,7 +120,7 @@ refuses to update a stable stick with anything but a clean release tag.
 | `beamctl/signaling.py` | Relays WebRTC connection setup between the robot screen and driving pages. No media passes through the server. |
 | `tests/` | Protocol unit tests, plus integration tests that run the real server against the simulator, and signaling tests. |
 | `image/` | **Robot USB stick.** Builds a bootable Debian image that starts the server, robot screen and Tailscale on boot, in two variants: stable and lab (experimental). See [docs/robot-usb.md](docs/robot-usb.md). |
-| `beambrain/`, `brain-host/` | **Brain (experimental).** Face recognition and spoken greetings, running on another computer. See [docs/brain.md](docs/brain.md). |
+| `beambrain/`, `brain-host/` | **Brain (experimental).** Face recognition and spoken greetings, Rocky (personality, voice, speech recognition), AI driving, running on another computer. See [docs/brain.md](docs/brain.md) and [docs/rocky.md](docs/rocky.md). |
 
 ## How video and audio work
 
@@ -186,7 +191,7 @@ in place of the cameras. Logs are in `/tmp/beam-sim.log` and `/tmp/beam-server.l
 Simulator options (`python3 -m beamctl.sim --help`) can inject corrupted or dropped replies.
 
 ```bash
-python3 -m pytest -q        # 93 tests, about a minute and a half
+python3 -m pytest -q        # 116 tests, about a minute and a half
 ```
 
 ## Safety behaviour
@@ -223,17 +228,29 @@ What we learned about the hardware is in [docs/motor-protocol.md](docs/motor-pro
 
 ## Third-party components
 
-Nothing below is bundled in this repository. Each is installed or downloaded separately and keeps
+**Included, with credit:** Rocky's face drawing (`beamctl/web/rocky-face.js`), its face pack and the
+basis of his personality (`beambrain/rocky.py`) come from [desk-robot](https://github.com/cgro00/desk-robot)
+by Casey, MIT License; the notice is in those files. So does his listening pipeline (`beambrain/ears.py`).
+`beambrain/whisper_features.py` is vendored from [Smart Turn](https://github.com/pipecat-ai/smart-turn) (Daily,
+BSD-2-Clause). Rocky is a character from Andy Weir's *Project Hail Mary*; this is fan work.
+
+Nothing else below is bundled in this repository. Each is installed or downloaded separately and keeps
 its own licence:
 
 - Python packages: aiohttp, NumPy, OpenCV, pytest (installed from your distribution or PyPI)
 - Face models **YuNet** and **SFace** from the [OpenCV model zoo](https://github.com/opencv/opencv_zoo),
   downloaded by `brain-host/install.sh`
+- Speech recognition on the brain host: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT)
+  with the Whisper `base.en` model (MIT), [Silero VAD](https://github.com/snakers4/silero-vad) (MIT) and
+  [Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2 (BSD-2-Clause); the models download once, pinned
+  and checked
+- Optional voice for Rocky: [Fish Audio](https://fish.audio) (a paid cloud service; bring your own key). The
+  default voice is a community-made fan clone of the character, for personal use
 - Text to speech: [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0) and its
   `en_US-lessac-medium` voice (see that voice's model card on Hugging Face), or `espeak-ng` as a fallback.
   They run as a separate, optional dependency of the brain.
 - Robot USB image: Debian 13, Chromium, cage, PipeWire, Tailscale and the other Debian packages listed in
-  `image/build-image.sh`, fetched from their official repositories when you build the image
+  `image/packages.txt`, fetched from their official repositories when you build the image
 - AI models: any OpenAI-compatible provider. The bake-off was run on [Synthetic](https://synthetic.new).
   Bring your own API key; it's never stored in this repository.
 

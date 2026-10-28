@@ -13,10 +13,9 @@
   .face { text-align: center; }
   .face h1 { font-size: 7vmin; font-weight: 700; margin: 0 0 1vmin; letter-spacing: -.01em; }
   .face p { font-size: 3vmin; color: var(--muted); margin: 0; }
-  .eyes { display: flex; gap: 10vmin; justify-content: center; margin-bottom: 5vmin; }
-  .eye { width: 9vmin; height: 9vmin; border-radius: 50%; background: var(--text); animation: blink 6s infinite; }
-  @keyframes blink { 0%, 96%, 100% { transform: scaleY(1); } 98% { transform: scaleY(.1); } }
-  body.live .eye { background: var(--ok); }
+  /* Rocky's face (rocky-face.js): a 128x64 grid, scaled up with crisp pixels. Its colour is set from the script:
+     white idle, green with a driver connected, AI purple while Rocky talks or the AI drives. */
+  .eyes { display: block; width: min(76vw, 76vmin); aspect-ratio: 2 / 1; margin: 0 auto 2vmin; image-rendering: pixelated; }
   .corner { position: fixed; left: 2vmin; bottom: 2vmin; display: flex; gap: 2vmin; align-items: center;
             color: var(--muted); font-size: 2.2vmin; }
   .dot { width: 1.4vmin; height: 1.4vmin; border-radius: 50%; background: var(--muted); display: inline-block; margin-right: .6vmin; }
@@ -36,10 +35,17 @@
   /* Shown whenever the brain is connected, so people in the room know faces are being recognised. */
   .brain-ind { color: var(--warn); display: none; }
   .brain-ind.on { display: inline; }
-  .bubble { position: fixed; left: 50%; bottom: 16vmin; transform: translateX(-50%); max-width: 80vw;
-            background: var(--text); color: var(--bg); font-size: 5vmin; font-weight: 700; padding: 1.6vmin 3.2vmin;
+  /* Shown whenever the microphone goes to the brain (only while nobody drives); bold while he's talking to you. */
+  .ear-ind { color: var(--ai); display: none; }
+  .ear-ind.on { display: inline; }
+  .mute-ind { display: none; }
+  .mute-ind.on { display: inline; }
+  .ear-ind.awake { font-weight: 700; color: #fff; background: var(--ai); padding: .2vmin 1vmin; border-radius: .8vmin; }
+  .bubble { position: fixed; left: 50%; bottom: 7vmin; transform: translateX(-50%); max-width: 84vw;
+            background: var(--text); color: var(--bg); font-size: 4vmin; font-weight: 700; padding: 1.4vmin 3vmin;
             border-radius: 3vmin; opacity: 0; transition: opacity .3s; text-align: center; }
   .bubble.show { opacity: 1; }
+  body.bubbling .face h1, body.bubbling .face p { visibility: hidden; }   /* the words take the title's place */
   .bubble.ai { background: var(--ai); color: #fff; }
   /* The AI is in charge: impossible to miss, and never the same look as a person. */
   :root { --ai: #7c4dff; }
@@ -47,7 +53,6 @@
                font-size: 3.4vmin; font-weight: 700; padding: 1.4vmin 2vmin; display: none; z-index: 5; }
   .ai-banner small { display: block; font-size: 2.4vmin; font-weight: 500; opacity: .9; }
   .ai-banner.on { display: block; }
-  body.ai-active .eye { background: var(--ai); }
   /* Sleep mode: nothing on screen (the backlight is off too), cameras and microphone closed. */
   .sleep { position: fixed; inset: 0; background: #000; z-index: 10; display: none; }
   body.asleep .sleep { display: block; }
@@ -55,7 +60,7 @@
 </head>
 <body>
   <div class="face">
-    <div class="eyes"><div class="eye"></div><div class="eye"></div></div>
+    <canvas id="eyes" class="eyes"></canvas>
     <h1 id="title">Starting…</h1>
     <p id="subtitle"></p>
   </div>
@@ -63,6 +68,8 @@
     <span><span id="srvDot" class="dot"></span><span id="srvText">server</span></span>
     <span id="battery"></span>
     <span id="brainInd" class="brain-ind">● face recognition on</span>
+    <span id="earInd" class="ear-ind">👂 Rocky is listening · say "hey Rocky"</span>
+    <span id="muteInd" class="mute-ind">🔇 Rocky's microphone is off</span>
   </div>
   <div id="bubble" class="bubble"></div>
   <div id="aiBanner" class="ai-banner"></div>
@@ -71,6 +78,7 @@
   <div id="setup" class="setup"></div>
   <button id="sound" class="sound">Enable sound</button>
   <div class="sleep"></div>
+<script src="/rocky-face.js"></script>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -84,14 +92,25 @@
   const peers = new Map();                     // pilot id -> { pc, audio }
   let ws = null, media = null;
   let asleep = false;
-  // Speaker volume for the driver's voice and spoken messages, set from the panel (phone) buttons.
-  let volume = 1;
-  try { volume = Math.min(1, Math.max(0.1, parseFloat(localStorage.getItem("volume")) || 1)); } catch (e) { /* no storage */ }
-  function setVolume(delta) {
-    volume = Math.min(1, Math.max(0.1, Math.round((volume + delta) * 10) / 10));
-    try { localStorage.setItem("volume", String(volume)); } catch (e) { /* fine */ }
-    for (const p of peers.values()) if (p.audio) p.audio.volume = volume;
-    showBubble(`🔊 Volume ${Math.round(volume * 100)}%`, 1500);
+  // Volumes, set from the panel (phone) buttons and remembered here: the drivers' voices and other spoken
+  // messages (0.1-1), and Rocky's voice (0.2-2.5: above 100% is a boost, through a limiter).
+  const stored = (k, lo, hi) => { try { const v = parseFloat(localStorage.getItem(k)); return v >= lo && v <= hi ? v : 1; } catch (e) { return 1; } };
+  let volume = stored("volume", 0.1, 1), rockyVolume = stored("rockyVolume", 0.2, 2.5), rockyGain = null;
+  function setVolume(target, delta) {
+    const round = (x) => Math.round(x * 10) / 10;
+    if (target === "rocky") {
+      rockyVolume = Math.min(2.5, Math.max(0.2, round(rockyVolume + delta)));
+      if (rockyGain) rockyGain.gain.value = rockyVolume;
+    } else {
+      volume = Math.min(1, Math.max(0.1, round(volume + delta)));
+      for (const p of peers.values()) if (p.audio) p.audio.volume = volume;
+    }
+    try { localStorage.setItem("volume", String(volume)); localStorage.setItem("rockyVolume", String(rockyVolume)); } catch (e) { /* fine */ }
+    showBubble(target === "rocky" ? `🤖 Rocky's voice ${Math.round(rockyVolume * 100)}%` : `🔊 Drivers ${Math.round(volume * 100)}%`, 1500);
+    reportVolumes();
+  }
+  function reportVolumes() {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "volumes", speaker: volume, rocky: rockyVolume }));
   }
 
   // ---------- local media ----------
@@ -340,10 +359,13 @@
     ws.onopen = () => {
       $("srvDot").className = "dot ok"; $("srvText").textContent = "server"; render();
       if (media) ws.send(JSON.stringify({ type: "cameras", ...media.labels }));   // which camera became which view (logged)
+      reportVolumes();                                                            // for the phone's volume buttons
     };
     ws.onclose = (ev) => {
       for (const id of [...peers.keys()]) closePeer(id);
       setFrameRate(0);
+      setListening(false);
+      $("muteInd").classList.remove("on");
       $("brainInd").classList.remove("on");
       seenNames = []; pilotNames = {}; panelOnline = false;
       if (ev.code === 4000) {
@@ -369,11 +391,15 @@
         $("brainInd").textContent = m.paused ? "● face recognition paused" : "● face recognition on";
       }
       else if (m.type === "say") say(m);
+      else if (m.type === "face") rockyFace(m.emotion);
+      else if (m.type === "listen") setListening(!!m.on);
+      else if (m.type === "ears_status") $("muteInd").classList.toggle("on", !!(m.muted && m.available));
+      else if (m.type === "rocky_awake") rockyAwake(m.seconds || 60);
       else if (m.type === "seen") { seenNames = m.names || []; render(); }
       else if (m.type === "ai") showAi(m);
       else if (m.type === "pilots") { pilotNames = m.names || {}; render(); }
       else if (m.type === "show") showBubble(m.text, (m.seconds || 5) * 1000);
-      else if (m.type === "volume") setVolume(m.delta || 0);
+      else if (m.type === "volume") setVolume(m.target, m.delta || 0);
       else if (m.type === "panel") { panelOnline = !!m.online; if (!panelOnline && phone) closePhone(false); updateRear(); }
     };
   }
@@ -405,11 +431,14 @@
   function showBubble(text, ms, ai = false) {
     const b = $("bubble");
     b.textContent = text; b.classList.add("show"); b.classList.toggle("ai", ai);
-    clearTimeout(bubbleTimer); bubbleTimer = setTimeout(() => b.classList.remove("show"), ms);
+    document.body.classList.add("bubbling");
+    clearTimeout(bubbleTimer);
+    bubbleTimer = setTimeout(() => { b.classList.remove("show"); document.body.classList.remove("bubbling"); }, ms);
   }
   function showAi(m) {
     const b = $("aiBanner");
     document.body.classList.toggle("ai-active", !!m.active);
+    faceColor();
     if (m.active) {
       b.textContent = `🤖 AI is driving${m.action ? " · " + m.action : ""}`;
       const small = document.createElement("small");
@@ -422,12 +451,138 @@
     }
   }
   function say(m) {
-    const ai = m.by === "ai";
-    if (m.text) showBubble(ai ? `🤖 AI: ${m.text}` : m.text, 6000, ai);
-    if (!m.wav) return;
+    const rocky = m.by === "rocky", ai = m.by === "ai" || rocky;
+    if (m.text) showBubble(rocky ? `🤖 Rocky (AI): ${m.text}` : ai ? `🤖 AI: ${m.text}` : m.text,
+                           Math.max(6000, m.text ? m.text.length * 90 : 0), ai);
+    if (rocky) rockyFace(m.emotion);
+    if (!m.wav) {
+      if (rocky) talkFor(m.text ? m.text.length * 70 : 0);
+      return;
+    }
     const a = new Audio("data:audio/wav;base64," + m.wav);
     a.volume = volume;
+    if (rocky) rockyAudio(a);
     a.play().catch(() => {});                // kiosk autoplay is allowed; elsewhere it may be blocked
+  }
+
+  // ---------- Rocky's face ----------
+  // Purple whenever the AI speaks or drives (the room must always be able to tell AI from a person),
+  // green while a driver is connected, white otherwise.
+  const face = window.RockyFace ? RockyFace.mount($("eyes")) : null;
+  let rockyActive = false, rockyTimer = null, audioCtx = null;
+  function faceColor() {
+    if (!face) return;
+    const aiOn = rockyActive || document.body.classList.contains("ai-active");
+    face.setColor(aiOn ? [124, 77, 255] : document.body.classList.contains("live") ? [57, 196, 119] : [233, 237, 242]);
+  }
+  function rockyFace(emotion) {
+    if (!face) return;
+    face.setEmotion(emotion || "neutral");
+    rockyActive = true; faceColor();
+    clearTimeout(rockyTimer);
+    rockyTimer = setTimeout(rockyDone, 30000);   // in case the reply never comes
+  }
+  function rockyDone() {
+    clearTimeout(rockyTimer);
+    rockyTimer = setTimeout(() => { if (face) face.setEmotion("neutral"); rockyActive = false; faceColor(); }, 4000);
+  }
+  function talkFor(ms) {
+    if (!face) return;
+    face.setTalking(true); face.setLevel(0.08);
+    setTimeout(() => { face.setTalking(false); rockyDone(); }, ms);
+  }
+  // Rocky's voice: through his own volume (which may boost above 100%) and a limiter, so a boost gets louder
+  // without crackling; the mouth opens with the loudness of the voice.
+  let limiter = null;
+  function rockyAudio(a) {
+    let an = null;
+    try {
+      audioCtx = audioCtx || new AudioContext();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      if (!rockyGain) {
+        rockyGain = audioCtx.createGain();
+        rockyGain.gain.value = rockyVolume;
+        limiter = audioCtx.createDynamicsCompressor();
+        limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20;
+        limiter.attack.value = 0.003; limiter.release.value = 0.1;
+        rockyGain.connect(limiter).connect(audioCtx.destination);
+      }
+      a.volume = 1;                                  // his own volume replaces the drivers' one
+      const src = audioCtx.createMediaElementSource(a);
+      src.connect(rockyGain);
+      an = audioCtx.createAnalyser();
+      an.fftSize = 512;
+      src.connect(an);
+    } catch (e) {
+      a.volume = Math.min(1, rockyVolume);           // no Web Audio: no boost, but still his volume
+    }
+    // The microphone pauses while he talks, so he doesn't hear (and answer) himself.
+    a.addEventListener("playing", () => { clearTimeout(talkingTimer); rockyTalking = true; });
+    const quietAgain = () => { clearTimeout(talkingTimer); talkingTimer = setTimeout(() => { rockyTalking = false; }, 400); };
+    a.addEventListener("ended", quietAgain);
+    a.addEventListener("error", quietAgain);
+    if (!face) return;
+    const buf = an && new Float32Array(an.fftSize);
+    const tick = () => {
+      if (a.ended || a.paused && a.currentTime > 0) return;
+      an.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) sum += v * v;
+      face.setLevel(Math.sqrt(sum / buf.length));
+      requestAnimationFrame(tick);
+    };
+    a.addEventListener("playing", () => { face.setTalking(true); if (an) tick(); });
+    a.addEventListener("ended", () => { face.setTalking(false); rockyDone(); });
+    a.addEventListener("error", () => { face.setTalking(false); rockyDone(); });
+  }
+
+  // ---------- ears: the microphone to the brain, only while the server allows it ----------
+  // The server says when ("listen"): robot awake, brain asking, and nobody driving. Sent as 16 kHz 16-bit PCM,
+  // 100 ms at a time, from the same microphone track drivers hear (with the browser's echo and noise cancellation).
+  let rockyTalking = false, talkingTimer = null, ears = null;
+  const EAR_WORKLET = `registerProcessor("ear", class extends AudioWorkletProcessor {
+    process(inputs) { if (inputs[0][0]) this.port.postMessage(inputs[0][0].slice(0)); return true; } });`;
+  let listenWanted = false;
+  async function setListening(on) {
+    listenWanted = on;
+    $("earInd").classList.toggle("on", on);
+    if (!on) {
+      $("earInd").classList.remove("awake");
+      if (ears) { ears.ctx.close().catch(() => {}); ears = null; }
+      return;
+    }
+    const track = media && media.head && media.head.getAudioTracks()[0];
+    if (ears || !track) return;
+    try {
+      const ctx = new AudioContext({ sampleRate: 16000 });
+      ears = { ctx };
+      await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([EAR_WORKLET], { type: "text/javascript" })));
+      if (!listenWanted || !ears || ears.ctx !== ctx) { ctx.close().catch(() => {}); return; }   // switched off meanwhile
+      const node = new AudioWorkletNode(ctx, "ear");
+      ctx.createMediaStreamSource(new MediaStream([track])).connect(node);
+      const block = new Int16Array(1600);
+      let n = 0;
+      node.port.onmessage = (e) => {
+        for (const v of e.data) {
+          block[n++] = Math.max(-32768, Math.min(32767, Math.round(v * 32767)));
+          if (n === block.length) {
+            n = 0;
+            if (!rockyTalking && ws && ws.readyState === 1 && ws.bufferedAmount < 256 * 1024) ws.send(block.buffer.slice(0));
+          }
+        }
+      };
+    } catch (e) {
+      console.warn("listening unavailable", e);
+      $("earInd").classList.remove("on");
+      if (ears) { ears.ctx.close().catch(() => {}); ears = null; }
+    }
+  }
+  let awakeTimer = null;
+  function rockyAwake(seconds) {                 // he heard his name: make it obvious he's listening to you
+    const ind = $("earInd");
+    ind.classList.add("awake"); ind.textContent = "👂 Rocky is listening to you";
+    clearTimeout(awakeTimer);
+    awakeTimer = setTimeout(() => { ind.classList.remove("awake"); ind.textContent = '👂 Rocky is listening · say "hey Rocky"'; }, seconds * 1000);
   }
 
   // ---------- screen ----------
@@ -439,6 +594,7 @@
     const connected = [...peers].filter(([, p]) => p.pc.connectionState === "connected").map(([id]) => id);
     const live = connected.length;
     document.body.classList.toggle("live", live > 0 || seenNames.length > 0);
+    faceColor();
 
     const named = [...new Set(connected.map((id) => pilotNames[id]).filter(Boolean))];
     const unnamed = connected.filter((id) => !pilotNames[id]).length;

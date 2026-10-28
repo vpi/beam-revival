@@ -1,0 +1,23 @@
+# Debian packages on the robot's USB stick, read by build-image.sh (new sticks) and by
+# scripts/deploy-robot.sh, which installs any that a running stick is missing.
+# A release that needs a new package adds it here. (Tailscale comes from its own repository.)
+
+# System and boot
+systemd-sysv systemd-timesyncd udev dbus dbus-user-session libpam-systemd kmod
+linux-image-amd64 initramfs-tools intel-microcode amd64-microcode
+firmware-linux-free firmware-misc-nonfree firmware-atheros firmware-realtek firmware-intel-sound firmware-iwlwifi
+grub-pc-bin grub-efi-amd64-bin grub2-common
+
+# Network and remote access
+network-manager wpasupplicant iw wireless-regdb openssh-server sudo ca-certificates curl gnupg
+
+# Motor server, and adb for the optional phone panel
+python3 python3-aiohttp adb
+
+# Robot screen, audio, video
+chromium cage fonts-dejavu-core fonts-noto-color-emoji xwayland
+pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils alsa-tools
+mesa-va-drivers intel-media-va-driver-non-free i965-va-driver
+
+# Tools
+usbutils v4l-utils cloud-guest-utils e2fsprogs dosfstools zstd less nano procps iproute2 iputils-ping

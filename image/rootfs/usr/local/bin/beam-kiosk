@@ -10,6 +10,13 @@ for _ in $(seq 60); do
   sleep 1
 done
 
+# Speaker at 80%: PipeWire starts a new sound card at 40%, too quiet for a room. (The phone panel's
+# volume buttons still turn the page's own volume down from there.) Retried while audio starts up.
+for _ in $(seq 10); do
+  wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.8 2>/dev/null && break
+  sleep 1
+done
+
 cage -d -s -- chromium \
   --kiosk --noerrdialogs --disable-infobars --no-first-run --disable-session-crashed-bubble \
   --check-for-update-interval=31536000 --password-store=basic \

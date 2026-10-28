@@ -409,7 +409,8 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
     world_url: the simulator's virtual-world endpoint (dev only); the robot test page then shows its camera.
     """
     cfg = ctrl.cfg
-    hub = MediaHub(cfg.brain_fps)
+    # The phone's "Rocky listening" switch is remembered next to the sleep state.
+    hub = MediaHub(cfg.brain_fps, os.path.join(os.path.dirname(cfg.sleep_state), "ears.json") if cfg.sleep_state else None)
     app = web.Application()
 
     def authorized(request: web.Request) -> bool:
@@ -451,6 +452,9 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
         await hub.attach_robot(ws)
         try:
             async for msg in ws:
+                if msg.type == WSMsgType.BINARY:
+                    await hub.audio_from_robot(msg.data)      # the microphone, only while listening is allowed
+                    continue
                 if msg.type != WSMsgType.TEXT:
                     continue
                 if msg.data.startswith('{"type":"frame"'):
@@ -464,12 +468,14 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                         await hub.from_robot(str(m["to"]), m["data"])
                     elif m.get("type") == "video_stats":
                         log.info("video to a driver: captured %s, sent %s", m.get("captured"), m.get("sent"))
+                    elif m.get("type") == "volumes":
+                        await hub.volumes_from_robot(m)
                     elif m.get("type") == "cameras":
                         log.info("robot page cameras: head=#%s nav=#%s, roles %s, labels %s", m.get("head"), m.get("nav"), m.get("roles"), m.get("all"))
                 except (ValueError, TypeError, KeyError):
                     pass
         finally:
-            hub.detach_robot(ws)
+            await hub.detach_robot(ws)
         return ws
 
     async def panel_ws(request: web.Request) -> web.WebSocketResponse:
@@ -615,7 +621,10 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                     elif kind == "rear_light":
                         await hub.rear_light_from_pilot(bool(m.get("on")))
                     elif kind == "brain":
-                        await hub.brain_cmd_from_pilot(pid, m["data"])
+                        if m["data"].get("kind") == "chat" and ctrl.sleep.asleep:
+                            await ws.send_json({"type": "notice", "text": "Rocky is asleep. Wake the robot first."})
+                        else:
+                            await hub.brain_cmd_from_pilot(pid, m["data"])
                 except (ValueError, TypeError, AttributeError, KeyError):
                     await ws.send_json({"type": "error", "reason": "bad message"})
         finally:
@@ -628,6 +637,12 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
     app.router.add_get("/", page("index.html"))
     app.router.add_get("/robot", page("robot.html"))
     app.router.add_get("/panel", page("panel.html"))
+
+    async def face_script(request: web.Request) -> web.StreamResponse:
+        # Rocky's face drawing (no data in it), so no token: the robot page loads it with a plain <script src>.
+        return web.FileResponse(WEB_DIR / "rocky-face.js", headers={"Cache-Control": "no-cache",
+                                                                     "Content-Type": "text/javascript"})
+    app.router.add_get("/rocky-face.js", face_script)
     app.router.add_get("/api/status", status)
     app.router.add_get("/ws", ws_handler)
 

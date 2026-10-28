@@ -11,7 +11,7 @@ VENV=$HOME/beam-brain-venv
 
 sudo apt-get install -y -qq python3-opencv python3-aiohttp python3-venv espeak-ng >/dev/null
 [ -x "$VENV/bin/python" ] || python3 -m venv --system-site-packages "$VENV"
-"$VENV/bin/pip" install -q piper-tts
+"$VENV/bin/pip" install -q piper-tts faster-whisper   # voice; speech recognition for Rocky (models download on first start)
 
 M=$HOME/beam-brain/models
 mkdir -p "$M" "$HOME/beam-brain/data"

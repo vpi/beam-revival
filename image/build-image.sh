@@ -84,18 +84,9 @@ printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-lo
 
 step "Installing packages"
 in_root apt-get update -qq
+# The list is shared with scripts/deploy-robot.sh, which adds new ones to running sticks.
 in_root apt-get install -y -qq --no-install-recommends \
-  systemd-sysv systemd-timesyncd udev dbus dbus-user-session libpam-systemd kmod \
-  linux-image-amd64 initramfs-tools intel-microcode amd64-microcode \
-  firmware-linux-free firmware-misc-nonfree firmware-atheros firmware-realtek firmware-intel-sound firmware-iwlwifi \
-  grub-pc-bin grub-efi-amd64-bin grub2-common \
-  network-manager wpasupplicant iw wireless-regdb openssh-server sudo ca-certificates curl gnupg \
-  python3 python3-aiohttp adb \
-  chromium cage fonts-dejavu-core xwayland \
-  pipewire pipewire-pulse pipewire-alsa wireplumber alsa-utils alsa-tools \
-  mesa-va-drivers intel-media-va-driver-non-free i965-va-driver \
-  usbutils v4l-utils cloud-guest-utils e2fsprogs dosfstools zstd less nano procps iproute2 iputils-ping \
-  >/var/tmp/beam-apt.log
+  $(sed 's/#.*//' "$HERE/packages.txt") >/var/tmp/beam-apt.log
 
 step "Installing Tailscale"
 curl -fsSL "https://pkgs.tailscale.com/stable/debian/$SUITE.noarmor.gpg" -o "$ROOT/usr/share/keyrings/tailscale-archive-keyring.gpg"

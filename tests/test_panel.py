@@ -59,11 +59,20 @@ async def test_call_owner_reaches_every_driver(client):
         await ws.close()
 
 
-async def test_volume_buttons_reach_the_robot_page(client):
+async def test_volume_buttons_reach_the_robot_page_and_show_its_levels(client):
     robot = await client.ws_connect("/ws?role=robot")
     panel = await client.ws_connect("/ws?role=panel")
     await panel.send_json({"type": "volume", "delta": -0.1})
-    assert (await next_of(robot, "volume"))["delta"] == pytest.approx(-0.1)
+    v = await next_of(robot, "volume")
+    assert v["target"] == "speaker" and v["delta"] == pytest.approx(-0.1)     # drivers' voices, as before
+    await panel.send_json({"type": "volume", "target": "rocky", "delta": 0.1})
+    assert (await next_of(robot, "volume"))["target"] == "rocky"
+
+    await robot.send_json({"type": "volumes", "speaker": 0.9, "rocky": 1.6})   # the robot page's answer
+    assert await next_of(panel, "volumes") == {"type": "volumes", "speaker": 0.9, "rocky": 1.6}
+    await panel.close()
+    panel = await client.ws_connect("/ws?role=panel")                          # a replugged phone sees them too
+    assert (await next_of(panel, "volumes"))["rocky"] == 1.6
     for ws in (robot, panel):
         await ws.close()
 

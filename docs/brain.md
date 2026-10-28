@@ -25,8 +25,9 @@ autonomy) can plug into the same connection later.
 
 ## Privacy
 
-- Everything stays on your own machines. Camera frames go robot → brain host over Tailscale.
-  Nothing is sent to the cloud.
+- Face recognition stays on your own machines. Camera frames go robot → brain host over Tailscale.
+  Nothing is sent to the cloud. (Talking to Rocky does send words to an AI service: see
+  [rocky.md](rocky.md).)
 - Only people you name are recognised. Everyone else is just "a face" and isn't stored.
 - Stored per person: a name, up to 30 face embeddings (lists of numbers, not photos) and one 64-px
   thumbnail, in `~/beam-brain/data/people.json`, readable only by its owner. **Forget** deletes them.
@@ -43,7 +44,7 @@ arrive 3 times a second. The robot only captures and sends frames; all the work 
 ```bash
 brain-host/install.sh wss://beam-lab.<your-tailnet>.ts.net/ws "$(cat ~/beam-brain/brain.key)"
 ```
-This installs OpenCV, Piper (voice) and the models, writes `/etc/beam-brain.env`, and starts the
+This installs OpenCV, Piper (voice), faster-whisper (Rocky's speech recognition) and the models, writes `/etc/beam-brain.env`, and starts the
 `beam-brain` service. To point it at a different robot, or back at the dev simulator,
 edit `BEAM_BRAIN_URL` in `/etc/beam-brain.env`, then `sudo systemctl restart beam-brain`.
 Logs: `journalctl -u beam-brain -f`.
@@ -52,9 +53,9 @@ Logs: `journalctl -u beam-brain -f`.
 `ROBOT_NAME=beam-lab` and the matching `BRAIN_KEY`. The stable stick ignores the brain unless you
 add a `BRAIN_KEY` to its `beam.conf`.
 
-The brain connects to only one robot at a time. Right now the VM's brain is pointed at the **dev
-simulator** (`ws://127.0.0.1:8080/ws`). Switch it to `wss://beam-lab.<your-tailnet>.ts.net/ws` when the
-lab stick is in the robot.
+The brain connects to only one robot at a time: the lab robot (`wss://beam-lab.<your-tailnet>.ts.net/ws`)
+or the dev simulator (`ws://127.0.0.1:8080/ws`). Keep a copy of each setting, for example
+`/etc/beam-brain.env.sim`, to switch quickly.
 
 ## Try it without the robot
 

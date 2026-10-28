@@ -30,6 +30,20 @@
   button:disabled { opacity: .45; }
   .call { grid-column: span 2; background: var(--accent); border-color: var(--accent); color: #fff; font-size: 23px; padding: 26px 10px; }
   .wide { grid-column: span 2; }
+  .hidden { display: none; }
+  /* Rocky's listening switch: two lines (state, then what a tap does), the same size either way. */
+  #earsBtn { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 17px 10px;
+             background: #12351f; border-color: var(--ok); color: #fff; }
+  #earsBtn.hidden { display: none; }
+  #earsBtn small { font-size: 14px; font-weight: 500; opacity: .85; }
+  #earsBtn.muted { background: #3a1d1d; border-color: var(--bad); }
+  #sleepBtn { background: #b8580f; border-color: #e0761f; color: #fff; }   /* dark orange: stands out on the dark page */
+  /* A volume: − level + on one line. Drivers' voices, and Rocky's (his can go above 100%). */
+  .vol { grid-column: span 2; display: grid; grid-template-columns: 72px 1fr 72px; gap: 10px; align-items: center; }
+  .vol button { padding: 14px 0; font-size: 28px; line-height: 1; }
+  .lvl { text-align: center; }
+  .lvl b { display: block; font-size: 16px; }
+  .lvl span { color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
   .row { display: flex; justify-content: space-between; color: var(--muted); font-size: 15px; padding: 0 4px; }
   .note { text-align: center; color: var(--muted); min-height: 1.35em; font-size: 15px; }
   .offline { color: var(--bad); }
@@ -54,8 +68,13 @@
 
   <div class="grid">
     <button class="call" id="callBtn">🔔 Call owner</button>
-    <button id="volDown" aria-label="Quieter">🔉 Quieter</button>
-    <button id="volUp" aria-label="Louder">🔊 Louder</button>
+    <div class="vol"><button data-target="speaker" data-delta="-0.1" aria-label="Drivers quieter">−</button>
+      <div class="lvl"><b>🔊 Drivers</b><span id="volSpeaker">—</span></div>
+      <button data-target="speaker" data-delta="0.1" aria-label="Drivers louder">+</button></div>
+    <button class="wide hidden" id="earsBtn"><b id="earsState">👂 Rocky is listening</b><small id="earsHint">tap to stop</small></button>
+    <div class="vol"><button data-target="rocky" data-delta="-0.1" aria-label="Rocky quieter">−</button>
+      <div class="lvl"><b>🤖 Rocky</b><span id="volRocky">—</span></div>
+      <button data-target="rocky" data-delta="0.1" aria-label="Rocky louder">+</button></div>
     <button class="wide" id="sleepBtn">😴 Sleep</button>
   </div>
   <div class="note" id="note"></div>
@@ -94,8 +113,24 @@
     note(watchers ? "🔔 Calling… they've been notified." : "Nobody is connected right now.", 6000);
     $("callBtn").disabled = true; setTimeout(() => $("callBtn").disabled = false, 8000);
   });
-  $("volDown").addEventListener("click", () => send({ type: "volume", delta: -0.1 }));
-  $("volUp").addEventListener("click", () => send({ type: "volume", delta: +0.1 }));
+  for (const b of document.querySelectorAll(".vol button")) {
+    b.addEventListener("click", () => send({ type: "volume", target: b.dataset.target, delta: parseFloat(b.dataset.delta) }));
+  }
+  // Rocky's microphone: people in the room can switch it off (and on again). Only shown when there is a Rocky.
+  let earsMuted = false;
+  function showEars(m) {
+    earsMuted = !!m.muted;
+    const b = $("earsBtn");
+    b.classList.toggle("hidden", !m.available && !m.muted);
+    b.classList.toggle("muted", earsMuted);
+    $("earsState").textContent = earsMuted ? "🔇 Rocky is not listening" : "👂 Rocky is listening";
+    $("earsHint").textContent = earsMuted ? "tap to turn on" : "tap to stop";
+  }
+  $("earsBtn").addEventListener("click", () => send({ type: "ears_mute", muted: !earsMuted }));
+  function showVolumes(m) {                       // the robot page's levels, after every change
+    $("volSpeaker").textContent = `${Math.round(m.speaker * 100)}%`;
+    $("volRocky").textContent = `${Math.round(m.rocky * 100)}%`;
+  }
   $("sleepBtn").addEventListener("click", () => send({ type: "sleep" }));
   $("wakeBtn").addEventListener("click", () => { send({ type: "wake" }); $("wakeBtn").textContent = "Waking up…"; });
 
@@ -189,6 +224,8 @@
       if (m.type === "status") render(m);
       else if (m.type === "rtc") onRtc(m.from, m.data);
       else if (m.type === "light") setLight(m.on);
+      else if (m.type === "volumes") showVolumes(m);
+      else if (m.type === "ears_status") showEars(m);
     };
     ws.onclose = (ev) => {
       for (const id of [...peers.keys()]) closePeer(id);
