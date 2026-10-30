@@ -205,15 +205,20 @@ class Transcriber:
 
 # --- the wake word -----------------------------------------------------------------------
 
-WAKE_PHRASES = ["hey rocky", "hey rocket", "hey rocking", "hi rocky", "a rocky", "hey ricky", "okay rocky"]
-_WAKE_RE = re.compile(r"\b(?:" + "|".join(r"\W+".join(map(re.escape, p.split())) for p in WAKE_PHRASES)
-                      + r")\b[\s,.!?:;-]*", re.IGNORECASE)
+# How Whisper writes "hey" and "Rocky" (it also runs them together: "Hirocky").
+WAKE_GREETINGS = ["hey", "hay", "hei", "hi", "a", "okay", "ok", "oh"]
+WAKE_NAMES = ["rocky", "rockey", "rockie", "rocki", "roki", "rokey", "rocco", "rocket", "rocking", "ricky", "roxy"]
+_NAME = r"(?:" + "|".join(WAKE_NAMES) + r")"
+_WAKE_RE = re.compile(r"\b(?:" + "|".join(WAKE_GREETINGS) + r")\W*" + _NAME + r"\b[\s,.!?:;-]*", re.IGNORECASE)
+_NAME_ONLY_RE = re.compile(r"^\W*" + _NAME + r"\W*$", re.IGNORECASE)    # "Rocky?" on its own: he's being called
+_NAME_RE = re.compile(r"\b" + _NAME + r"\b", re.IGNORECASE)
 AWAKE_S = 60.0       # after "hey Rocky", no need to say his name again for this long
 
 
 class Wake:
     """Whether something heard is meant for Rocky. Returns ("ignore", ""), ("wake", "") for his name alone,
-    or ("chat", words to answer). His name alone, without "hey", doesn't wake him (too easy to say by chance)."""
+    or ("chat", words to answer). His name inside a sentence, without "hey", doesn't wake him (too easy to say
+    by chance); his name said on its own does."""
 
     def __init__(self, awake_s: float = AWAKE_S):
         self.awake_s, self.until = awake_s, 0.0
@@ -229,6 +234,9 @@ class Wake:
             self.until = now + self.awake_s
             rest = text[m.end():].strip()
             return ("chat", rest) if re.search(r"\w", rest) else ("wake", "")
+        if _NAME_ONLY_RE.match(text):
+            self.until = now + self.awake_s
+            return "wake", ""
         if now < self.until and re.search(r"\w", text):
             self.until = now + self.awake_s
             return "chat", text.strip()
@@ -236,6 +244,15 @@ class Wake:
 
     def sleep(self) -> None:
         self.until = 0.0
+
+    def wake_up(self, now: float | None = None) -> None:
+        """As if he'd heard his name (e.g. someone waved)."""
+        self.until = (time.monotonic() if now is None else now) + self.awake_s
+
+    @staticmethod
+    def has_name(text: str) -> bool:
+        """For the log (which never gets the words): did ignored speech contain something like his name?"""
+        return bool(_NAME_RE.search(text))
 
 
 # --- the whole thing, on its own thread -------------------------------------------------

@@ -3,7 +3,8 @@
   python3 -m beambrain --url wss://beam.<tailnet>.ts.net/ws --key <BRAIN_KEY> [--token <ACCESS_TOKEN>]
 
 Messages (see beamctl/signaling.py for the server side):
-  in:  frame (from the robot camera), brain_cmd (from a driving page: enroll / forget / pause / chat)
+  in:  frame (from the robot camera), brain_cmd (from a driving page: enroll / forget / pause / chat / voice /
+       personality)
   out: faces, people, notice, rocky (to driving pages); say, show, face (to the robot); status (to everyone)
 """
 
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -26,8 +28,10 @@ from .ears import Wake
 from .faces import FaceEngine, thumbnail_jpeg
 from .greeter import Greeter
 from .people import PeopleStore
+from .rocky import MAX_PERSONALITY, PERSONALITY
 from .speech import FISH_ROCKY, Speaker
 from .tracker import Tracker
+from .wave import WaveDetector
 
 log = logging.getLogger("beambrain")
 
@@ -58,13 +62,18 @@ class Brain:
         self.driver = None
         self.rocky = None                    # the personality (beambrain/rocky.py), when there's an AI key
         self.chat_task: asyncio.Task | None = None
+        self.thinking_about: str | None = None   # what was said to him, while the AI is still answering it
         self.fish = None                     # Fish Audio voice (speech.FishVoice), when there's a key
         self.rocky_voice = "piper"           # "piper" or "fish", switched from the driving page
-        self.settings_path: Path | None = None   # where that choice is remembered across restarts
+        self.say_id = 0                      # numbers Fish's streamed replies, so the robot can tell them apart
+        self.personality_by: dict | None = None  # who last changed his personality, and when: {"name", "at"}
+        self.settings_path: Path | None = None   # where those choices are remembered across restarts
         self.ears = None                     # beambrain/ears.Ears: the robot's microphone -> text
         self.wake = Wake()
         self.wake_reply: asyncio.Task | None = None   # "Question?" after his name alone, unless words follow
+        self.waves: WaveDetector | None = None   # beambrain/wave.py: a wave wakes him too (needs the face engine)
         self.listening = False               # the server sends the microphone (awake, nobody driving)
+        self.home_drivers: set[str] = set()  # Tailscale logins whose typed chats may control the home
 
     # --- connection ------------------------------------------------------------
 
@@ -107,6 +116,7 @@ class Brain:
         await self.send({"type": "seen", "names": []})
         if self.rocky is not None:
             await self.send_voice()
+            await self.send_personality()
         # Ask for the robot's microphone; the server decides when it may come (awake, nobody driving).
         await self.send({"type": "ears", "on": self.rocky is not None and self.ears is not None})
         stopper = asyncio.create_task(stop.wait())
@@ -181,6 +191,13 @@ class Brain:
                  "name": t.name, "score": round(t.score, 3)} for t in tracks]})
             # All live tracks, not just this frame's detections: one missed frame mustn't make names flicker.
             await self.update_in_view(sorted({t.name for t in self.tracker.tracks.values() if t.name}))
+            if self.waves is not None and self.listening and self.rocky is not None and not self.wake.awake:
+                waved = self.waves.update(img, [f.box for f in faces], time.monotonic())
+                w = self.waves
+                log.debug("wave check: faces %d, hand zone %.2f, person moved %.2f, scene %.2f, hits %d/%d",
+                          len(faces), w.last_score, w.last_moved, w.last_scene, sum(h > 0 for h in w.hits), len(w.hits))
+                if waved:
+                    await self.on_wave()
             for t in tracks:
                 if t.name:
                     text = self.greeter.maybe_greet(t.name)
@@ -190,6 +207,18 @@ class Brain:
             log.exception("frame processing failed")
         finally:
             self._busy = False
+
+    async def look(self, camera: str) -> str | None:
+        """Rocky's eyes: a fresh frame (base64 JPEG) from the head or floor camera, or None if it isn't sending.
+        Shown on the robot screen, so the room knows a picture is going to the AI."""
+        cam = "nav" if camera == "floor" else "head"
+        for _ in range(15):
+            f = self.frames.get(cam)
+            if f and f[0] and time.monotonic() - f[1] < 1.5:
+                await self.send({"type": "rocky_look", "camera": camera})
+                return f[0]
+            await asyncio.sleep(0.1)
+        return None
 
     async def update_in_view(self, names: list[str]) -> None:
         """Tell the robot screen who it's looking at, only when that changes."""
@@ -239,7 +268,7 @@ class Brain:
         elif kind == "ai_task":
             await self.start_ai_task(str(d.get("task", "")).strip()[:300], d.get("model"))
         elif kind == "chat":
-            await self.start_chat(str(d.get("text", "")).strip()[:500], d.get("sender"))
+            await self.start_chat(str(d.get("text", "")).strip()[:500], d.get("sender"), login=d.get("login"))
         elif kind == "voice":
             if d.get("voice") == "fish" and self.fish is None:
                 await self.send({"type": "notice", "text": "The Fish Audio voice isn't set up (no ~/beam-brain/fish.key)."})
@@ -247,6 +276,8 @@ class Brain:
                 self.rocky_voice = d["voice"]
                 self.save_settings()
             await self.send_voice()
+        elif kind == "personality":
+            await self.set_personality(d.get("text"), d.get("sender"), d.get("login"))
         elif kind == "ai_stop":
             if self.driver is not None:
                 self.driver.abort("stopped from the driving page")
@@ -262,7 +293,12 @@ class Brain:
 
     # --- Rocky: typed chat and speech in the room, spoken replies -----------------------
 
-    async def start_chat(self, text: str, sender: str | None, spoken: bool = False) -> None:
+    def may_control_home(self, spoken: bool, login: str | None) -> bool:
+        """Anyone in the room may ask Rocky to switch things (they can reach the switches anyway); a remote
+        driver only if their Tailscale login (from the robot server, not the page) is on --home-drivers."""
+        return spoken or (login is not None and login.lower() in self.home_drivers)
+
+    async def start_chat(self, text: str, sender: str | None, spoken: bool = False, login: str | None = None) -> None:
         if self.rocky is None:
             await self.send({"type": "notice", "text": "Rocky isn't set up on the brain (no AI key)."})
             return
@@ -272,25 +308,35 @@ class Brain:
             if not spoken:
                 await self.send({"type": "notice", "text": "Rocky is still answering. Wait a moment."})
             return
-        self.chat_task = asyncio.create_task(self._chat(text, sender, spoken))   # don't hold up frames and commands
+        self.chat_task = asyncio.create_task(self._chat(text, sender, spoken, self.may_control_home(spoken, login)))
 
-    async def _chat(self, text: str, sender: str | None, spoken: bool = False) -> None:
+    async def _chat(self, text: str, sender: str | None, spoken: bool = False, may_control: bool = False) -> None:
         await self.send({"type": "face", "emotion": "thinking"})
+        self.thinking_about = text if spoken else None
         try:
             async with aiohttp.ClientSession() as session:
-                emotion, words = await self.rocky.reply(session, text, sender, list(self.in_view), spoken)
+                emotion, words, actions = await self.rocky.reply(session, text, sender, list(self.in_view), spoken,
+                                                                 may_control)
         except Exception as e:
+            self.thinking_about = None
             log.warning("Rocky's reply failed: %s", e)
             await self.send({"type": "face", "emotion": "neutral"})
             await self.send({"type": "notice", "text": "Rocky couldn't think of a reply (the AI service failed)."})
             return
+        self.thinking_about = None                       # from here on he's answering: too late to add words
         log.info("Rocky [%s]: %s", emotion, words)
         voice, tts_s = await self.rocky_say(words, emotion)
+        log.info("voice: %s, sound after %s s", voice, tts_s)
         await self.send({"type": "rocky", "sender": sender, "heard": text, "emotion": emotion, "text": words,
-                         "voice": voice, "tts_s": tts_s, "spoken": spoken})
+                         "voice": voice, "tts_s": tts_s, "spoken": spoken, "actions": actions})
 
     async def rocky_say(self, words: str, emotion: str) -> tuple[str | None, float | None]:
-        """Say it on the robot in Rocky's voice, with his face. Returns (which voice, seconds to make it)."""
+        """Say it on the robot in Rocky's voice, with his face. Returns (which voice, seconds until it could
+        start: Fish streams, so that's its first sound; Piper's whole clip is ready at once)."""
+        if self.rocky_voice == "fish" and self.fish is not None:
+            first_s = await self.fish_say(words, emotion)
+            if first_s is not None:
+                return "fish", first_s
         wav, voice, tts_s = await self.rocky_speech(words)
         if wav:
             from .speech import level
@@ -309,6 +355,8 @@ class Brain:
             if self.ears is not None:
                 self.ears.reset()
             self.wake.sleep()
+            if self.waves is not None:
+                self.waves.reset()
 
     async def on_heard(self, text: str) -> None:
         """A finished spoken turn from the room (beambrain/ears.py)."""
@@ -316,7 +364,8 @@ class Brain:
             return
         action, words = self.wake.heard(text)
         if action == "ignore":
-            log.info("heard speech not meant for Rocky (%d words)", len(text.split()))   # never its words
+            log.info("heard speech not meant for Rocky (%d words%s)", len(text.split()),   # never its words
+                     ", his name without 'hey'" if self.wake.has_name(text) else "")
             return
         await self.send({"type": "rocky_awake", "seconds": self.wake.awake_s})
         if self.wake_reply is not None:
@@ -330,27 +379,71 @@ class Brain:
             await self.send({"type": "face", "emotion": "curious"})
             self.wake_reply = asyncio.create_task(self._question_after(self.WAKE_WAIT_S))
         else:
+            if self.thinking_about is not None and self.chat_task is not None and not self.chat_task.done():
+                # More words while he's still thinking: the speaker only paused mid-sentence (it happens to about
+                # one turn in six). Drop the half-done answer and answer the whole thing.
+                words = f"{self.thinking_about} {words}"
+                self.chat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.chat_task
+                self.thinking_about = None
+                log.info("more words before Rocky answered: answering them together")
+            elif self.chat_task is not None and not self.chat_task.done():
+                log.info("heard more words while Rocky was answering; dropped")
             await self.start_chat(words[:500], sender, spoken=True)
 
     WAKE_WAIT_S = 1.2
+
+    async def on_wave(self) -> None:
+        """Someone waved at him (beambrain/wave.py): the same as "hey Rocky" alone."""
+        if self.chat_task is not None and not self.chat_task.done():
+            return
+        log.info("Rocky saw a wave")
+        self.wake.wake_up()
+        await self.send({"type": "rocky_awake", "seconds": self.wake.awake_s, "by": "wave"})
+        await self.send({"type": "face", "emotion": "curious"})
+        self.wake_reply = asyncio.create_task(self._question_after(0.3))
 
     async def _question_after(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
         self.wake_reply = None
         await self.rocky_say("Question?", "curious")
 
-    async def rocky_speech(self, words: str) -> tuple[bytes | None, str | None, float | None]:
-        """Rocky's chosen voice; Piper if Fish fails (no credit, network), so he never goes silent.
-        Returns (wav, which voice made it, seconds it took)."""
-        from .speech import FishError
-        if self.rocky_voice == "fish" and self.fish is not None:
-            t0 = time.monotonic()
-            try:
-                wav = await asyncio.to_thread(self.fish.wav, words)
-                return wav, "fish", round(time.monotonic() - t0, 2)
-            except FishError as e:
+    async def fish_say(self, words: str, emotion: str) -> float | None:
+        """Rocky's Fish voice, sent to the robot as Fish makes it ("say" with a stream id, then "say_audio"
+        pieces, then "say_audio" end), so he starts talking ~1 s sooner than with the whole clip. Returns the
+        seconds until the first sound went out, or None if Fish failed before any (then Piper speaks instead)."""
+        from .speech import STREAM_RATE, FishError, Leveller
+        self.say_id += 1
+        sid, t0, first_s = self.say_id, time.monotonic(), None
+        leveller = Leveller()
+
+        async def send(pieces: list[bytes]) -> None:
+            nonlocal first_s
+            for pcm in pieces:
+                if first_s is None:
+                    first_s = round(time.monotonic() - t0, 2)
+                    await self.send({"type": "say", "by": "rocky", "emotion": emotion, "text": words,
+                                     "stream": sid, "rate": STREAM_RATE})
+                await self.send({"type": "say_audio", "stream": sid, "pcm": base64.b64encode(pcm).decode()})
+        try:
+            async with aiohttp.ClientSession() as session:
+                async for pcm in self.fish.stream(session, words):
+                    await send(leveller.feed(pcm))
+            await send(leveller.flush())
+        except FishError as e:
+            if first_s is None:
                 log.warning("Fish voice failed, using Piper: %s", e)
                 await self.send({"type": "notice", "text": f"Fish voice failed, used Piper instead. {e}"})
+                return None
+            log.warning("Fish voice broke off: %s", e)          # he stops mid-sentence; rare
+        if first_s is not None:
+            await self.send({"type": "say_audio", "stream": sid, "end": True})
+        return first_s
+
+    async def rocky_speech(self, words: str) -> tuple[bytes | None, str | None, float | None]:
+        """Rocky's Piper voice (local), as a whole WAV: also what he falls back to when Fish fails (no credit,
+        network), so he never goes silent. Returns (wav, "piper", seconds it took)."""
         if self.speaker is None:
             return None, None, None
         t0 = time.monotonic()
@@ -363,19 +456,60 @@ class Brain:
 
     def load_settings(self) -> None:
         try:
-            voice = json.loads(self.settings_path.read_text()).get("voice")
+            saved = json.loads(self.settings_path.read_text())
         except (AttributeError, OSError, ValueError):
             return
+        voice = saved.get("voice")
         if voice == "piper" or (voice == "fish" and self.fish is not None):
             self.rocky_voice = voice
+        mine = saved.get("personality")
+        if self.rocky is not None and isinstance(mine, dict) and isinstance(mine.get("text"), str):
+            self.rocky.personality = mine["text"][:MAX_PERSONALITY]
+            self.personality_by = {"name": mine.get("by"), "at": mine.get("at")}
 
     def save_settings(self) -> None:
         if self.settings_path is None:
             return
+        saved = {"voice": self.rocky_voice}
+        if self.rocky is not None and self.rocky.personality != PERSONALITY:
+            by = self.personality_by or {}
+            saved["personality"] = {"text": self.rocky.personality, "by": by.get("name"), "at": by.get("at")}
         try:
-            self.settings_path.write_text(json.dumps({"voice": self.rocky_voice}) + "\n")
+            self.settings_path.write_text(json.dumps(saved, indent=1) + "\n")
         except OSError as e:
             log.warning("couldn't save Rocky's settings: %s", e)
+
+    def may_edit_personality(self, login: str | None) -> bool:
+        """Changing who Rocky is affects everyone, so with a list of household drivers (--home-drivers) only
+        they may; without one, any driver may (like the voice switch)."""
+        return not self.home_drivers or (login is not None and login.lower() in self.home_drivers)
+
+    async def set_personality(self, text: str | None, sender: str | None, login: str | None) -> None:
+        """text: the new personality, or empty/None for the default."""
+        if self.rocky is None:
+            return
+        if not self.may_edit_personality(login):
+            await self.send({"type": "notice", "text": "Only the household's drivers can change Rocky's personality."})
+            await self.send_personality()
+            return
+        text = str(text or "").replace("\r\n", "\n").strip()[:MAX_PERSONALITY]
+        self.rocky.personality = text or PERSONALITY
+        self.rocky.history = []        # a fresh start: his old replies would pull him back to the old style
+        changed = self.rocky.personality != PERSONALITY
+        self.personality_by = {"name": sender or "a driver", "at": int(time.time())} if changed else None
+        self.save_settings()
+        log.info("Rocky's personality %s by a driver (%d characters)", "changed" if changed else "reset",
+                 len(self.rocky.personality))
+        who = sender or "A driver"
+        await self.send({"type": "notice", "text": f"{who} changed Rocky's personality." if changed else
+                         f"{who} put Rocky's personality back to the default."})
+        await self.send_personality()
+
+    async def send_personality(self) -> None:
+        if self.rocky is None:
+            return
+        await self.send({"type": "rocky_personality", "text": self.rocky.personality,
+                         "default": PERSONALITY, "max": MAX_PERSONALITY, **(self.personality_by or {})})
 
     async def send_voice(self) -> None:
         await self.send({"type": "rocky_voice", "voice": self.rocky_voice,
@@ -414,6 +548,13 @@ def main() -> None:
                     help="Fish Audio voice id for Rocky (needs ~/beam-brain/fish.key)")
     ap.add_argument("--fish-model", default="", help='Fish Audio model, e.g. "s2.1-pro" (default: Fish\'s default)')
     ap.add_argument("--no-ears", action="store_true", help="never listen to the robot's microphone")
+    ap.add_argument("--no-wave", action="store_true", help="a wave doesn't wake Rocky (only \"hey Rocky\")")
+    ap.add_argument("--no-eyes",action="store_true", help="Rocky never sends camera pictures to the AI")
+    ap.add_argument("--home-url", default="",
+                    help="Home Assistant's MCP endpoint, e.g. http://<ha>:8123/api/mcp (needs ~/beam-brain/ha.key)")
+    ap.add_argument("--home-drivers", default="",
+                    help="comma-separated Tailscale logins whose typed chats may control the home "
+                         "(speech in the room always may)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -435,7 +576,18 @@ def main() -> None:
     if ai:
         from .llm import LLM
         from .rocky import Rocky
-        brain.rocky = Rocky(LLM(ai["model"], ai["key"]))
+        home = None
+        if args.home_url:
+            from .home import HomeAssistant, load_token
+            token = load_token(Path(args.data).parent / "ha.key")
+            if token:
+                home = HomeAssistant(args.home_url, token)
+                brain.home_drivers = {s.strip().lower() for s in args.home_drivers.split(",") if s.strip()}
+                log.info("Rocky can control Home Assistant (room speech, and %d allowed driver(s))",
+                         len(brain.home_drivers))
+            else:
+                log.warning("--home-url given but no ~/beam-brain/ha.key; no home control")
+        brain.rocky = Rocky(LLM(ai["model"], ai["key"]), home=home, eyes=None if args.no_eyes else brain.look)
         fish_key = Path(args.data).parent / "fish.key"
         if fish_key.exists() and fish_key.read_text().strip():
             from .speech import FishVoice
@@ -446,6 +598,8 @@ def main() -> None:
         if not args.no_ears:
             from .ears import Ears
             brain.ears = Ears(args.models, brain.on_heard)
+            if not args.no_wave:
+                brain.waves = WaveDetector()
     log.info("knows %d people", len(brain.store.people))
     try:
         asyncio.run(brain.run(url))

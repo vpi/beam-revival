@@ -48,7 +48,7 @@ fi
 # Record the executable bit in the copy's git index for every tracked file starting with "#!".
 if [ -d "$DEST/.git" ]; then
   git -C "$DEST" ls-files | while read -r f; do
-    [ "$(head -c2 "$DEST/$f" 2>/dev/null)" = "#!" ] && git -C "$DEST" update-index --chmod=+x -- "$f"
+    if [ "$(head -c2 "$DEST/$f" 2>/dev/null)" = "#!" ]; then git -C "$DEST" update-index --chmod=+x -- "$f"; fi
   done
 fi
 

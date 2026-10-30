@@ -107,6 +107,12 @@
   #rockyVoiceRow { align-items: center; } #rockyVoice { width: auto; flex: 1; margin-left: 8px; }
   .rockylog b { color: var(--text); font-weight: 600; }
   .rockylog .rocky { color: var(--ai); }
+  #rockyPersona { margin-top: 8px; } #rockyPersona summary { cursor: pointer; font-weight: 600; }
+  #personaText { width: 100%; box-sizing: border-box; min-height: 220px; resize: vertical; font: inherit;
+                 font-size: 12px; line-height: 1.4; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 6px; }
+  .personabar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+  #personaCount { margin-left: auto; }
   .dot.ai { background: var(--ai); }
   .banner {
     position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
@@ -225,6 +231,20 @@
       </div>
       <p class="help">Rocky answers out loud in the room, with his face on the robot screen. What you type goes to the AI service; with the Fish voice, his reply also goes to Fish Audio.</p>
       <div class="ailog rockylog" id="rockyLog"></div>
+      <details id="rockyPersona" class="hiddenCard">
+        <summary>Personality</summary>
+        <p class="help">Who Rocky is and how he talks; it goes to the AI with every message. Short spoken replies,
+          the emotion tag that sets his face, and honesty about what he sees stay fixed. A change is for everyone and
+          starts his conversation afresh.</p>
+        <textarea id="personaText" spellcheck="false"></textarea>
+        <div class="personabar">
+          <button class="aibtn" id="personaSave">Save</button>
+          <button class="linkbtn" id="personaUndo">Undo edits</button>
+          <button class="linkbtn" id="personaReset">Default</button>
+          <span class="help" id="personaCount"></span>
+        </div>
+        <p class="help" id="personaBy"></p>
+      </details>
     </div>
 
     <div class="card hiddenCard" id="peopleCard">
@@ -278,6 +298,7 @@
       else if (m.type === "ai") onAi(m);
       else if (m.type === "rocky") onRocky(m);
       else if (m.type === "rocky_voice") onRockyVoice(m);
+      else if (m.type === "rocky_personality") onRockyPersonality(m);
     };
   }
 
@@ -408,6 +429,15 @@
     reply.className = "rocky";
     reply.textContent = `Rocky (${m.emotion}): ${m.text}`;
     entry.append(reply);
+    for (const a of m.actions || []) {       // pictures he took, and what he did in Home Assistant
+      const did = document.createElement("div");
+      did.className = "rocky";
+      const what = Object.values(a.args || {}).filter((v) => typeof v !== "object").join(", ");
+      did.textContent = a.tool === "look"
+        ? `📷 Rocky (AI) looked with the ${what} camera ${a.ok ? "✓" : "✗ no picture"}`
+        : `🏠 Rocky (AI) → ${a.tool.split("__").pop()} ${what} ${a.ok ? "✓" : "✗ failed"}`;
+      entry.append(did);
+    }
     if (m.voice) {
       const how = document.createElement("small");
       how.textContent = ` · ${m.voice === "fish" ? "Fish" : "Piper"} voice, ${m.tts_s} s`;
@@ -425,6 +455,39 @@
   $("rockyVoice").addEventListener("change", () => {
     send({ type: "brain", data: { kind: "voice", voice: $("rockyVoice").value } });
     $("rockyVoice").blur();       // back to driving keys
+  });
+
+  // Rocky's personality: the editable part of his prompt. Edits stay local until Save; an update from the brain
+  // (someone else saved) replaces the text only if you haven't started editing.
+  let persona = null;
+  function onRockyPersonality(m) {
+    const edited = persona && $("personaText").value.trim() !== persona.text;   // (the brain trims it)
+    persona = m;
+    $("rockyPersona").classList.remove("hiddenCard");
+    $("personaText").maxLength = m.max;
+    if (!edited) $("personaText").value = m.text;
+    const isDefault = m.text === m.default;
+    $("personaBy").textContent = isDefault ? "Rocky's default personality." :
+      `Changed by ${m.name || "a driver"}` + (m.at ? `, ${new Date(m.at * 1000).toLocaleString()}.` : ".");
+    personaCount();
+  }
+  function personaCount() {
+    if (!persona) return;
+    const v = $("personaText").value;
+    $("personaCount").textContent = `${v.length} / ${persona.max}` + (v.trim() !== persona.text ? " · not saved" : "");
+  }
+  $("personaText").addEventListener("input", personaCount);
+  $("personaSave").addEventListener("click", () => {
+    send({ type: "brain", data: { kind: "personality", text: $("personaText").value } });
+  });
+  $("personaUndo").addEventListener("click", () => {
+    if (persona) $("personaText").value = persona.text;
+    personaCount();
+  });
+  $("personaReset").addEventListener("click", () => {
+    if (!persona || !confirm("Put Rocky's personality back to the default? Your version is not kept.")) return;
+    $("personaText").value = persona.text;               // drop unsaved edits, so the default replaces them
+    send({ type: "brain", data: { kind: "personality", text: "" } });
   });
 
   function onBrainState(m) {

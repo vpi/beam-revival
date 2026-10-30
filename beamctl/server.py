@@ -353,6 +353,13 @@ def visitor_name(request: web.Request) -> str | None:
     return first or None
 
 
+def visitor_login(request: web.Request) -> str | None:
+    """The driver's Tailscale login (unique, unlike the name), trusted only as visitor_name trusts its header."""
+    if request.remote not in ("127.0.0.1", "::1"):
+        return None
+    return request.headers.get("Tailscale-User-Login", "").strip()[:120] or None
+
+
 CAMERA_ROLES = {"25a1:0006": "head", "25a1:0007": "nav"}
 
 
@@ -577,7 +584,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
         await ws.prepare(request)
         me = object()
         who = visitor_name(request)
-        pid = await hub.attach_pilot(ws, who)
+        pid = await hub.attach_pilot(ws, who, visitor_login(request))
         await hub.greet_pilot(pid)
         peer = request.remote
         log.info("driver %sconnected from %s", f"{who} " if who else "", peer)

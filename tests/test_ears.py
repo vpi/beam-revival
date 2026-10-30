@@ -41,6 +41,14 @@ def test_wake_word():
     assert w.heard("Hello?", now=150) == ("ignore", "")                      # a minute of quiet: asleep again
     assert w.heard("hey rocket, how tall are you", now=200) == ("chat", "how tall are you")   # a common mishearing
     w.sleep()
+    assert w.heard("Hirocky, what time is it?", now=300) == ("chat", "what time is it?")    # run together
+    w.sleep()
+    assert w.heard("Hey Rocco.", now=400) == ("wake", "")
+    w.sleep()
+    assert w.heard("Rocky?", now=500) == ("wake", "")                        # his name on its own calls him
+    w.sleep()
+    assert w.heard("Ask Rocky later.", now=600) == ("ignore", "") and Wake.has_name("Ask Rocky later.")
+    assert w.heard("A rock in my shoe.", now=601) == ("ignore", "")
     assert not w.awake
 
 
@@ -287,3 +295,33 @@ async def test_phone_switch_turns_rockys_microphone_off_and_on(tmp_path):
         await ws.close()
     await client.close()
     await board.stop()
+
+async def test_words_after_a_mid_sentence_pause_are_answered_together():
+    pytest.importorskip("cv2")
+    from beambrain.brain import Brain
+    from beambrain.greeter import Greeter
+    from beambrain.llm import Reply
+    from beambrain.people import PeopleStore
+    from beambrain.rocky import Rocky
+
+    class SlowLLM:                                   # the AI takes a moment, as it does
+        def __init__(self):
+            self.asked = []
+
+        async def chat(self, session, messages, **kw):
+            self.asked.append(messages[-1]["content"])
+            await asyncio.sleep(0.3)
+            return Reply("[happy] Both, yes.")
+
+    brain = Brain(None, PeopleStore(":memory-not-used:"), None, Greeter())
+    llm = SlowLLM()
+    brain.rocky, brain.listening = Rocky(llm), True
+    said = []
+    brain.send = lambda m: asyncio.sleep(0)
+    brain.rocky_say = lambda words, emotion: asyncio.sleep(0, (said.append(words), (None, None))[1])
+    await brain.on_heard("Hey Rocky, do you like coffee")
+    await asyncio.sleep(0.1)                         # a pause, and the speaker goes on
+    await brain.on_heard("or tea?")
+    await brain.chat_task
+    assert "do you like coffee or tea?" in llm.asked[-1]
+    assert said == ["Both, yes."]                    # one answer, to the whole sentence

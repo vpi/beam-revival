@@ -40,6 +40,8 @@
   .ear-ind.on { display: inline; }
   .mute-ind { display: none; }
   .mute-ind.on { display: inline; }
+  .look-ind { display: none; font-weight: 700; color: #fff; background: var(--ai); padding: .2vmin 1vmin; border-radius: .8vmin; }
+  .look-ind.on { display: inline; }
   .ear-ind.awake { font-weight: 700; color: #fff; background: var(--ai); padding: .2vmin 1vmin; border-radius: .8vmin; }
   .bubble { position: fixed; left: 50%; bottom: 7vmin; transform: translateX(-50%); max-width: 84vw;
             background: var(--text); color: var(--bg); font-size: 4vmin; font-weight: 700; padding: 1.4vmin 3vmin;
@@ -70,6 +72,7 @@
     <span id="brainInd" class="brain-ind">● face recognition on</span>
     <span id="earInd" class="ear-ind">👂 Rocky is listening · say "hey Rocky"</span>
     <span id="muteInd" class="mute-ind">🔇 Rocky's microphone is off</span>
+    <span id="lookInd" class="look-ind">📷 Rocky is looking</span>
   </div>
   <div id="bubble" class="bubble"></div>
   <div id="aiBanner" class="ai-banner"></div>
@@ -391,10 +394,12 @@
         $("brainInd").textContent = m.paused ? "● face recognition paused" : "● face recognition on";
       }
       else if (m.type === "say") say(m);
+      else if (m.type === "say_audio") streamAudio(m);
       else if (m.type === "face") rockyFace(m.emotion);
       else if (m.type === "listen") setListening(!!m.on);
       else if (m.type === "ears_status") $("muteInd").classList.toggle("on", !!(m.muted && m.available));
-      else if (m.type === "rocky_awake") rockyAwake(m.seconds || 60);
+      else if (m.type === "rocky_awake") rockyAwake(m.seconds || 60, m.by);
+      else if (m.type === "rocky_look") rockyLook(m.camera);
       else if (m.type === "seen") { seenNames = m.names || []; render(); }
       else if (m.type === "ai") showAi(m);
       else if (m.type === "pilots") { pilotNames = m.names || {}; render(); }
@@ -455,6 +460,8 @@
     if (m.text) showBubble(rocky ? `🤖 Rocky (AI): ${m.text}` : ai ? `🤖 AI: ${m.text}` : m.text,
                            Math.max(6000, m.text ? m.text.length * 90 : 0), ai);
     if (rocky) rockyFace(m.emotion);
+    if (rocky) streamStop();                                 // a new reply cuts off one still playing
+    if (rocky && m.stream) { streamStart(m); return; }      // the sound follows in "say_audio" pieces
     if (!m.wav) {
       if (rocky) talkFor(m.text ? m.text.length * 70 : 0);
       return;
@@ -494,19 +501,91 @@
   // Rocky's voice: through his own volume (which may boost above 100%) and a limiter, so a boost gets louder
   // without crackling; the mouth opens with the loudness of the voice.
   let limiter = null;
+  function rockyOutput() {                         // his volume and limiter, made once
+    audioCtx = audioCtx || new AudioContext();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    if (!rockyGain) {
+      rockyGain = audioCtx.createGain();
+      rockyGain.gain.value = rockyVolume;
+      limiter = audioCtx.createDynamicsCompressor();
+      limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20;
+      limiter.attack.value = 0.003; limiter.release.value = 0.1;
+      rockyGain.connect(limiter).connect(audioCtx.destination);
+    }
+    return rockyGain;
+  }
+  // Rocky's Fish voice arrives in pieces as it's made: each is queued right after the one before, so he starts
+  // talking with the first piece instead of waiting for the whole reply.
+  let stream = null;
+  function streamStop() {
+    if (!stream) return;
+    for (const s of stream.sources) { try { s.stop(); } catch (e) {} }
+    clearTimeout(stream.doneTimer);
+    stream = null;
+  }
+  function streamStart(m) {
+    streamStop();
+    try {
+      const out = rockyOutput();
+      const an = audioCtx.createAnalyser();
+      an.fftSize = 512;
+      stream = { id: m.stream, rate: m.rate || 24000, next: 0, sources: [], an };
+      an.connect(out);
+      const st = stream;
+      st.doneTimer = setTimeout(() => streamDone(st), 10000);   // no sound ever came
+    } catch (e) {                                    // no Web Audio: show the words, move the mouth
+      stream = null;
+      talkFor(m.text ? m.text.length * 70 : 0);
+      return;
+    }
+    clearTimeout(talkingTimer); rockyTalking = true;   // the microphone pauses while he talks
+    if (!face) return;
+    face.setTalking(true);
+    const s = stream, buf = new Float32Array(s.an.fftSize);
+    const tick = () => {
+      if (stream !== s) return;
+      s.an.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) sum += v * v;
+      face.setLevel(Math.sqrt(sum / buf.length));
+      requestAnimationFrame(tick);
+    };
+    tick();
+  }
+  function streamAudio(m) {
+    const s = stream;
+    if (!s || m.stream !== s.id) return;
+    if (m.pcm) {
+      const bytes = atob(m.pcm), n = bytes.length >> 1, samples = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const v = bytes.charCodeAt(2 * i) | bytes.charCodeAt(2 * i + 1) << 8;
+        samples[i] = (v >= 32768 ? v - 65536 : v) / 32768;
+      }
+      const b = audioCtx.createBuffer(1, n, s.rate);
+      b.copyToChannel(samples, 0);
+      const src = audioCtx.createBufferSource();
+      src.buffer = b;
+      src.connect(s.an);
+      const at = Math.max(audioCtx.currentTime + 0.05, s.next);   // a small cushion against late pieces
+      src.start(at);
+      s.next = at + b.duration;
+      s.sources.push(src);
+    }
+    // Done once the last piece has played; if the end never comes (the brain went away), a few seconds after
+    // the sound runs out, so the microphone never stays paused.
+    clearTimeout(s.doneTimer);
+    s.doneTimer = setTimeout(() => streamDone(s), Math.max(0, s.next - audioCtx.currentTime) * 1000 + (m.end ? 0 : 5000));
+  }
+  function streamDone(s) {
+    if (stream !== s) return;
+    stream = null;
+    if (face) { face.setTalking(false); rockyDone(); }
+    clearTimeout(talkingTimer); talkingTimer = setTimeout(() => { rockyTalking = false; }, 400);
+  }
   function rockyAudio(a) {
     let an = null;
     try {
-      audioCtx = audioCtx || new AudioContext();
-      if (audioCtx.state === "suspended") audioCtx.resume();
-      if (!rockyGain) {
-        rockyGain = audioCtx.createGain();
-        rockyGain.gain.value = rockyVolume;
-        limiter = audioCtx.createDynamicsCompressor();
-        limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20;
-        limiter.attack.value = 0.003; limiter.release.value = 0.1;
-        rockyGain.connect(limiter).connect(audioCtx.destination);
-      }
+      rockyOutput();
       a.volume = 1;                                  // his own volume replaces the drivers' one
       const src = audioCtx.createMediaElementSource(a);
       src.connect(rockyGain);
@@ -578,11 +657,21 @@
     }
   }
   let awakeTimer = null;
-  function rockyAwake(seconds) {                 // he heard his name: make it obvious he's listening to you
+  function rockyAwake(seconds, by) {             // he heard his name (or saw a wave): make it obvious he's listening
     const ind = $("earInd");
-    ind.classList.add("awake"); ind.textContent = "👂 Rocky is listening to you";
+    ind.classList.add("awake");
+    ind.textContent = by === "wave" ? "👋 Rocky saw your wave · listening to you" : "👂 Rocky is listening to you";
     clearTimeout(awakeTimer);
     awakeTimer = setTimeout(() => { ind.classList.remove("awake"); ind.textContent = '👂 Rocky is listening · say "hey Rocky"'; }, seconds * 1000);
+  }
+
+  let lookTimer = null;
+  function rockyLook(camera) {                   // a picture just went to the AI: say so in the room
+    const ind = $("lookInd");
+    ind.textContent = camera === "floor" ? "📷 Rocky is looking at the floor" : "📷 Rocky is looking";
+    ind.classList.add("on");
+    clearTimeout(lookTimer);
+    lookTimer = setTimeout(() => ind.classList.remove("on"), 6000);
   }
 
   // ---------- screen ----------

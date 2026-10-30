@@ -20,16 +20,25 @@ this hub. While a brain is connected, the robot page sends camera frames:
   brain -> server -> pilots: {"type": "faces", ...} / {"type": "people", ...} / {"type": "notice", ...}
   brain -> server -> robot:  {"type": "say", "text": .., "wav": <base64>, "by"?, "emotion"?} / {"type": "show", "text": ..}
                              {"type": "face", "emotion": ..}  (Rocky's face, e.g. thinking while he waits for the AI)
+                             Rocky's Fish voice is streamed: "say" carries "stream": id and "rate" instead of "wav",
+                             then {"type": "say_audio", "stream", "pcm": <base64 16-bit mono>} pieces, then
+                             {"type": "say_audio", "stream", "end": true}
   brain -> server -> pilots: {"type": "rocky", "sender", "heard", "emotion", "text", "voice", "tts_s"}  (a typed chat
                              and its reply) / {"type": "rocky_voice", "voice", "available"}  (Piper or Fish Audio)
+                             / {"type": "rocky_personality", "text", "default", "max", "name"?, "at"?}  (the editable
+                             part of his prompt, and who changed it last)
   listening ("hey Rocky"): the brain asks with {"type": "ears", "on": true}; while it's allowed (robot page up, brain
                              asked, NO driver connected) robot and brain get {"type": "listen", "on": true}, and the
                              robot page sends its microphone as binary 16 kHz PCM, relayed to the brain as-is.
-                             brain -> robot: {"type": "rocky_awake", "seconds"} (he heard his name: show it)
+                             brain -> robot: {"type": "rocky_awake", "seconds", "by"?} (he heard his name, or
+                             "by": "wave" someone waved at him: show it)
+                             brain -> robot: {"type": "rocky_look", "camera"} (a picture is going to the AI: show it)
                              The phone has a switch for it, {"type": "ears_mute", "muted"} (remembered); robot and phone
                              get {"type": "ears_status", "muted", "available"}.
-  pilot -> server -> brain:  {"type": "brain_cmd", "from": <pilot id>, "data": {...}}  (enroll, forget, pause, chat;
-                             a chat gets "sender": the pilot's Tailscale name, added here)
+  pilot -> server -> brain:  {"type": "brain_cmd", "from": <pilot id>, "data": {...}}  (enroll, forget, pause, chat,
+                             personality; a chat or personality gets "sender": the pilot's Tailscale name, and
+                             "login": their Tailscale login, which the brain checks before letting them control the
+                             home or change him; both added here)
 Everyone is told {"type": "brain", "online": bool} when it comes and goes, so the robot screen can
 show that face recognition is running.
 
@@ -71,10 +80,11 @@ class MediaHub:
         self.rear_light: dict | None = None      # last {"type": "rear_light", ...} from the panel
         self.pilots: dict[str, web.WebSocketResponse] = {}
         self.pilot_names: dict[str, str] = {}
+        self.pilot_logins: dict[str, str] = {}
         self.brain: web.WebSocketResponse | None = None
         self.brain_fps = brain_fps
         self.people: dict | None = None          # last "people" message, for pilots that join later
-        self.rocky_voice: dict | None = None     # last "rocky_voice" message (Piper or Fish), likewise
+        self.rocky_settings: dict[str, dict] = {}   # last "rocky_voice" and "rocky_personality", likewise
         self.volumes: dict | None = None         # the robot page's speaker and Rocky levels, for the phone
         self.brain_ears = False                  # the brain asked for the microphone (Rocky listens)
         self.listening = False                   # the robot page is sending it (see _update_listen)
@@ -115,12 +125,14 @@ class MediaHub:
             log.info("robot media page offline")
             await self._update_listen()
 
-    async def attach_pilot(self, ws: web.WebSocketResponse, name: str | None = None) -> str:
-        """name: who the driver is, if known (Tailscale tells us; see server.visitor_name)."""
+    async def attach_pilot(self, ws: web.WebSocketResponse, name: str | None = None, login: str | None = None) -> str:
+        """name, login: who the driver is, if known (Tailscale tells us; see server.visitor_name)."""
         pid = f"p{next(self._ids)}"
         self.pilots[pid] = ws
         if name:
             self.pilot_names[pid] = name
+        if login:
+            self.pilot_logins[pid] = login
         await self._tell_robot_about_pilots()
         await self._update_listen()
         return pid
@@ -128,6 +140,7 @@ class MediaHub:
     async def detach_pilot(self, pid: str) -> None:
         self.pilots.pop(pid, None)
         self.pilot_names.pop(pid, None)
+        self.pilot_logins.pop(pid, None)
         for media in (self.robot, self.panel):
             await _send(media, {"type": "rtc", "from": pid, "data": {"kind": "bye"}})
         await self._tell_robot_about_pilots()
@@ -314,7 +327,7 @@ class MediaHub:
             if kind == "people":
                 self.people = msg
             await self._broadcast(msg)
-        elif kind in ("say", "show", "seen", "face", "rocky_awake"):
+        elif kind in ("say", "say_audio", "show", "seen", "face", "rocky_awake", "rocky_look"):
             await _send(self.robot, msg)
         elif kind == "ears":
             self.brain_ears = bool(msg.get("on"))
@@ -322,8 +335,8 @@ class MediaHub:
             await self._tell_about_ears()
         elif kind == "rocky":
             await self._broadcast(msg)            # the exchange, so every driver can read what Rocky said
-        elif kind == "rocky_voice":
-            self.rocky_voice = msg                # for drivers who join later
+        elif kind in ("rocky_voice", "rocky_personality"):
+            self.rocky_settings[kind] = msg       # for drivers who join later
             await self._broadcast(msg)
         elif kind == "ai":
             # The AI is (or stops being) in charge: everyone must be able to see that.
@@ -338,9 +351,9 @@ class MediaHub:
         if not self.brain_online:
             await _send(self.pilots.get(pid), {"type": "brain", "online": False})
             return
-        if data.get("kind") == "chat":
-            # Who's typing comes from the server (the Tailscale name), never from the page.
-            data = {**data, "sender": self.pilot_names.get(pid)}
+        if data.get("kind") in ("chat", "personality"):
+            # Who is typing (or changing his personality) comes from the server (Tailscale), never from the page.
+            data = {**data, "sender": self.pilot_names.get(pid), "login": self.pilot_logins.get(pid)}
         await _send(self.brain, {"type": "brain_cmd", "from": pid, "data": data})
 
     async def greet_pilot(self, pid: str) -> None:
@@ -351,8 +364,8 @@ class MediaHub:
             await _send(ws, self.rear_light)
         if self.people is not None:
             await _send(ws, self.people)
-        if self.brain_online and self.rocky_voice is not None:
-            await _send(ws, self.rocky_voice)
+        for msg in self.rocky_settings.values() if self.brain_online else ():
+            await _send(ws, msg)
 
     async def _broadcast(self, msg: dict) -> None:
         for pws in list(self.pilots.values()):

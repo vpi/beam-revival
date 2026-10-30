@@ -47,7 +47,7 @@ class FakeLLM:
 async def test_rocky_remembers_the_conversation():
     llm = FakeLLM("[curious] Question: what is coffee?")
     rocky = Rocky(llm)
-    assert await rocky.reply(None, "hi", "Alex", []) == ("curious", "Question: what is coffee?")
+    assert await rocky.reply(None, "hi", "Alex", []) == ("curious", "Question: what is coffee?", [])
     await rocky.reply(None, "coffee is fuel", "Alex", ["Leo"])
     second = llm.calls[1]
     assert second[0]["role"] == "system" and "Rocky" in second[0]["content"] and "Leo" in second[0]["content"]
@@ -59,11 +59,14 @@ async def test_chat_gets_the_drivers_name_and_rocky_reaches_robot_and_drivers(ri
     _, _, client = rig
     brain = await client.ws_connect(f"/ws?role=brain&key={KEY}")
     robot = await client.ws_connect("/ws?role=robot")
-    pilot = await client.ws_connect("/ws", headers={"Tailscale-User-Name": "Alex P."})
+    pilot = await client.ws_connect("/ws", headers={"Tailscale-User-Name": "Alex P.",
+                                                    "Tailscale-User-Login": "alex@example.com"})
     await asyncio.sleep(0.1)
-    await pilot.send_json({"type": "brain", "data": {"kind": "chat", "text": "hello", "sender": "Mallory"}})
+    await pilot.send_json({"type": "brain", "data": {"kind": "chat", "text": "hello", "sender": "Mallory",
+                                                     "login": "mallory@example.com"}})
     cmd = await next_of(brain, "brain_cmd")
-    assert cmd["data"] == {"kind": "chat", "text": "hello", "sender": "Alex"}     # the server's name, not the page's
+    # The server's name and login, not the page's.
+    assert cmd["data"] == {"kind": "chat", "text": "hello", "sender": "Alex", "login": "alex@example.com"}
 
     await brain.send_json({"type": "face", "emotion": "thinking"})
     assert (await next_of(robot, "face"))["emotion"] == "thinking"
@@ -124,16 +127,23 @@ async def test_brain_answers_a_chat_with_face_speech_and_log(rig):
 
 @pytest.fixture
 async def fake_fish():
-    """A stand-in for api.fish.audio: answers WAV, or 402 "no credit" when told to."""
+    """A stand-in for api.fish.audio: streams 1.2 s of raw PCM in odd-sized pieces, or 402 "no credit"."""
+    import numpy as np
     from aiohttp import web
     from aiohttp.test_utils import TestServer
-    state = {"credit": True, "seen": []}
+    t = np.arange(int(1.2 * 24000)) / 24000
+    state = {"credit": True, "seen": [], "pcm": (0.08 * np.sin(2 * np.pi * 220 * t) * 32767).astype(np.int16).tobytes()}
 
     async def tts(request):
         state["seen"].append((request.headers.get("Authorization"), await request.json()))
         if not state["credit"]:
             return web.json_response({"status": 402, "message": "Insufficient API credit."}, status=402)
-        return web.Response(body=b"RIFF\xff\xff\xff\xffWAVEfmt fake", content_type="audio/wav")
+        r = web.StreamResponse(headers={"Content-Type": "audio/pcm"})
+        await r.prepare(request)
+        for i in range(0, len(state["pcm"]), 1001):
+            await r.write(state["pcm"][i:i + 1001])
+        await r.write_eof()
+        return r
     app = web.Application()
     app.router.add_post("/v1/tts", tts)
     server = TestServer(app)
@@ -144,15 +154,28 @@ async def fake_fish():
 
 
 async def test_fish_voice_speaks_and_explains_refusals_without_the_key(fake_fish):
+    import aiohttp
     from beambrain.speech import FISH_ROCKY, FishError, FishVoice
     fish = FishVoice("secret-key", url=fake_fish["url"])
-    assert (await asyncio.to_thread(fish.wav, "Amaze!")).startswith(b"RIFF")
-    auth, body = fake_fish["seen"][0]
-    assert auth == "Bearer secret-key" and body["reference_id"] == FISH_ROCKY and body["format"] == "wav"
-    fake_fish["credit"] = False
-    with pytest.raises(FishError) as e:
-        await asyncio.to_thread(fish.wav, "Amaze!")
+    async with aiohttp.ClientSession() as session:
+        pieces = [p async for p in fish.stream(session, "Amaze!")]
+        assert b"".join(pieces) == fake_fish["pcm"] and all(len(p) % 2 == 0 for p in pieces)   # whole samples
+        auth, body = fake_fish["seen"][0]
+        assert auth == "Bearer secret-key" and body["reference_id"] == FISH_ROCKY and body["format"] == "pcm"
+        fake_fish["credit"] = False
+        with pytest.raises(FishError) as e:
+            [p async for p in fish.stream(session, "Amaze!")]
     assert "402" in str(e.value) and "credit" in str(e.value) and "secret-key" not in str(e.value)
+
+
+async def streamed_say(robot):
+    """A streamed reply as the robot gets it: the "say", then its sound."""
+    say = await next_of(robot, "say")
+    pcm = b""
+    while not (m := await next_of(robot, "say_audio")).get("end"):
+        assert m["stream"] == say["stream"]
+        pcm += base64.b64decode(m["pcm"])
+    return say, pcm
 
 
 async def test_voice_switch_and_fallback_to_piper(rig, fake_fish):
@@ -184,7 +207,8 @@ async def test_voice_switch_and_fallback_to_piper(rig, fake_fish):
         assert (await next_of(late, "rocky_voice"))["voice"] == "fish"
 
         await pilot.send_json({"type": "brain", "data": {"kind": "chat", "text": "hi"}})
-        assert base64.b64decode((await next_of(robot, "say"))["wav"]).endswith(b"WAVEfmt fake")   # Fish's WAV
+        say, pcm = await streamed_say(robot)                         # Fish, streamed
+        assert say["rate"] == 24000 and "wav" not in say and len(pcm) == len(fake_fish["pcm"])
         assert (await next_of(pilot, "rocky"))["voice"] == "fish"
 
         fake_fish["credit"] = False                                 # out of credit: Piper, and say why
@@ -198,18 +222,18 @@ async def test_voice_switch_and_fallback_to_piper(rig, fake_fish):
         await runner
 
 
-def test_fish_wav_gets_its_real_length():
-    import io
-    import wave
-    from beambrain.speech import fix_wav_sizes
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(b"\0\0" * 24000)
-    streamed = bytearray(buf.getvalue())
-    streamed[4:8] = b"\x24\xff\xff\xff"; streamed[40:44] = b"\x00\xff\xff\xff"    # as Fish sends it
-    fixed = fix_wav_sizes(bytes(streamed))
-    assert fixed == buf.getvalue()
-    assert wave.open(io.BytesIO(fixed)).getnframes() == 24000                     # exactly 1 s
+def test_streamed_voice_is_levelled_after_a_short_lead():
+    import numpy as np
+    from beambrain.speech import Leveller
+    t = np.arange(24000) / 24000
+    quiet = (0.1 * np.sin(2 * np.pi * 220 * t) * 32767).astype(np.int16).tobytes()   # 1 s, like Fish's Rocky
+    lev = Leveller()
+    assert lev.feed(quiet[:6000]) == []                            # 0.125 s: still judging how loud it is
+    out = lev.feed(quiet[6000:]) + lev.flush()
+    assert len(out[0]) == 12000 and sum(map(len, out)) == len(quiet)  # 0.25 s pieces, nothing lost
+    y = np.frombuffer(b"".join(out), np.int16) / 32768
+    assert 0.15 < np.sqrt(np.mean(y[np.abs(y) > 0.01] ** 2)) < 0.2  # about Piper's loudness
+    assert Leveller().flush() == []
 
 
 def test_quiet_voice_is_levelled_without_clipping():
@@ -269,10 +293,80 @@ async def test_voice_choice_survives_a_restart_and_greetings_use_it(rig, fake_fi
         text = second.greeter.maybe_greet("Vera")
         assert "Vera" in text and text in [g.format(name="Vera") for g in GREETINGS]
         await second.greet(text)
-        say = await next_of(robot, "say")
+        say, pcm = await streamed_say(robot)
         assert (say["by"], say["emotion"], say["text"]) == ("rocky", "happy", text)
-        assert base64.b64decode(say["wav"]).endswith(b"WAVEfmt fake")   # Fish, not Piper
+        assert pcm and "stream" in say                                  # Fish, not Piper
         await robot.close()
+    finally:
+        stop.set()
+        await runner
+
+
+def test_personality_is_editable_but_the_rules_stay():
+    from beambrain.rocky import BLIND, EYES, PERSONALITY, system_prompt
+    mine = system_prompt("You are Captain Rocky, a pirate robot. Say arr.", eyes=False)
+    assert mine.startswith("You are Captain Rocky") and PERSONALITY not in mine
+    assert "MUST start with an emotion tag" in mine and BLIND in mine and "telepresence robot" in mine
+    assert system_prompt("  \n", eyes=True).startswith(PERSONALITY) and EYES in system_prompt("", eyes=True)
+
+
+async def test_personality_from_the_driving_page(rig, tmp_path):
+    pytest.importorskip("cv2")
+    import json
+    from beambrain.brain import Brain
+    from beambrain.greeter import Greeter
+    from beambrain.people import PeopleStore
+    from beambrain.rocky import PERSONALITY
+
+    class FakeSpeaker:
+        def wav(self, text):
+            return b"RIFFpiper"
+
+    def new_brain():
+        b = Brain(None, PeopleStore(":memory-not-used:"), FakeSpeaker(), Greeter())
+        b.rocky = Rocky(FakeLLM("[happy] Arr."))
+        b.settings_path = tmp_path / "rocky.json"
+        b.load_settings()
+        return b
+
+    pirate = "You are Captain Rocky, a pirate robot. Say arr."
+    brain = new_brain()
+    _, _, client = rig
+    stop = asyncio.Event()
+    runner = asyncio.create_task(brain.run(str(client.make_url("/ws")) + f"?role=brain&key={KEY}", stop))
+    try:
+        robot = await client.ws_connect("/ws?role=robot")
+        pilot = await client.ws_connect("/ws")
+        p = await next_of(pilot, "rocky_personality")
+        assert p["text"] == p["default"] == PERSONALITY and "name" not in p
+
+        brain.rocky.history = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "[happy] Old."}]
+        await pilot.send_json({"type": "brain", "data": {"kind": "personality", "text": f"  {pirate}\r\n"}})
+        assert "changed Rocky's personality" in (await next_of(pilot, "notice"))["text"]
+        p = await next_of(pilot, "rocky_personality")
+        assert p["text"] == pirate and p["name"] and p["at"]
+        assert brain.rocky.history == []                                # a fresh start
+        late = await client.ws_connect("/ws")                           # a driver who joins later sees it
+        assert (await next_of(late, "rocky_personality"))["text"] == pirate
+
+        await pilot.send_json({"type": "brain", "data": {"kind": "chat", "text": "hi"}})
+        await next_of(pilot, "rocky")
+        assert brain.rocky.llm.calls[-1][0]["content"].startswith(pirate)
+        assert new_brain().rocky.personality == pirate                  # remembered across a restart
+
+        brain.home_drivers = {"owner@example.com"}                      # a household list: only they may
+        await pilot.send_json({"type": "brain", "data": {"kind": "personality", "text": "You are a toaster."}})
+        assert "Only the household" in (await next_of(pilot, "notice"))["text"]
+        assert (await next_of(pilot, "rocky_personality"))["text"] == pirate
+        brain.home_drivers = set()
+
+        await pilot.send_json({"type": "brain", "data": {"kind": "personality", "text": ""}})   # back to default
+        assert "back to the default" in (await next_of(pilot, "notice"))["text"]
+        p = await next_of(pilot, "rocky_personality")
+        assert p["text"] == PERSONALITY and "name" not in p
+        assert "personality" not in json.loads((tmp_path / "rocky.json").read_text())
+        for ws in (robot, pilot, late):
+            await ws.close()
     finally:
         stop.set()
         await runner

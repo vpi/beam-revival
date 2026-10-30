@@ -34,7 +34,8 @@ Tested on a real Beam+ (October 2026), running from a USB stick, with the robot'
   the room, a rear camera with a light, and a "Call owner" button ([docs/phone.md](docs/phone.md))
 - Experimental, on a separate Linux computer (the "brain"): **face recognition** with spoken greetings
   ([docs/brain.md](docs/brain.md)), and **Rocky**, a personality with an animated face on the robot screen
-  who answers out loud, typed to by drivers or spoken to in the room with "hey Rocky"
+  who answers out loud, typed to by drivers or spoken to in the room with "hey Rocky" (or a wave); he looks
+  through the cameras when asked and can switch Home Assistant lights
   ([docs/rocky.md](docs/rocky.md)). Both tried on a Beam+. AI driving so far only in the simulator
   ([docs/ai-driving.md](docs/ai-driving.md))
 
@@ -94,13 +95,13 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 | Nightly sleep schedule | optional, tested | – | `SLEEP_HOURS`, `TIMEZONE` in `beam.conf` |
 | Phone panel: touch screen for people in the room, rear camera and light, Call owner | optional, tested | a spare Android phone (USB-C, Chrome) | plug it in, see [docs/phone.md](docs/phone.md) |
 | Face recognition and spoken greetings | **experimental**, tried on a Beam+ | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
-| Rocky: animated face, typed chat from drivers, "hey Rocky" in the room (only while nobody drives) | **experimental**, tried on a Beam+ | the brain, an AI provider API key; optional Fish Audio key for his voice | see [docs/rocky.md](docs/rocky.md) |
+| Rocky: animated face, typed chat from drivers, "hey Rocky" or a wave in the room (only while nobody drives), sight when asked, Home Assistant control, editable personality | **experimental**, tried on a Beam+ | the brain, an AI provider API key; optional Fish Audio key for his voice, optional Home Assistant | see [docs/rocky.md](docs/rocky.md) |
 | AI driving | **experimental**, simulator only so far | the brain, plus an AI provider API key | see [docs/ai-driving.md](docs/ai-driving.md) |
 
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.3` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.4` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one
