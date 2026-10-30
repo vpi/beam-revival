@@ -17,11 +17,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
+import fcntl
 import json
 import logging
 import math
 import os
 import secrets
+import struct
 import time
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -363,14 +366,10 @@ def visitor_login(request: web.Request) -> str | None:
 CAMERA_ROLES = {"25a1:0006": "head", "25a1:0007": "nav"}
 
 
-def camera_roles(sysfs: str = "/sys/class/video4linux") -> list[str]:
-    """The role of each camera, in the order the robot page's browser lists them (/dev/video* order).
-
-    Both Beam+ cameras call themselves "M034-WDR" and Chromium shows no USB id, so the page can't tell
-    them apart by label; which one becomes /dev/video0 depends on which firmware loaded first.
-    """
-    roles = []
-    for d in sorted(Path(sysfs).glob("video*")):
+def _cameras(sysfs: str) -> list[tuple[str, str]]:
+    """(device name, role) of each camera, in /dev/video* order."""
+    cams = []
+    for d in sorted(Path(sysfs).glob("video*"), key=lambda d: int(d.name[5:]) if d.name[5:].isdigit() else 0):
         try:
             if (d / "index").read_text().strip() != "0":      # each camera also has a metadata node
                 continue
@@ -378,8 +377,42 @@ def camera_roles(sysfs: str = "/sys/class/video4linux") -> list[str]:
             vid_pid = f"{(usb / 'idVendor').read_text().strip()}:{(usb / 'idProduct').read_text().strip()}"
         except OSError:
             vid_pid = ""
-        roles.append(CAMERA_ROLES.get(vid_pid, "other"))
-    return roles
+        cams.append((d.name, CAMERA_ROLES.get(vid_pid, "other")))
+    return cams
+
+
+def camera_roles(sysfs: str = "/sys/class/video4linux") -> list[str]:
+    """The role of each camera, in /dev/video* order: the robot page's fallback guess at which is which.
+
+    Both Beam+ cameras call themselves "M034-WDR" and Chromium shows no USB id, so the page can't tell
+    them apart by label; which one becomes /dev/video0 depends on which firmware loaded first. Chromium
+    doesn't always list them in that order, or only them, so the page asks cameras_in_use() instead.
+    """
+    return [role for _, role in _cameras(sysfs)]
+
+
+VIDIOC_REQBUFS = 0xC0145608      # _IOWR('V', 8, struct v4l2_requestbuffers)
+
+
+def cameras_in_use(sysfs: str = "/sys/class/video4linux", dev: str = "/dev") -> list[str]:
+    """Roles of the cameras some program (the robot page) is capturing from right now. The page opens one
+    camera at a time and asks, so it learns exactly which is which. A camera streams to one program at a
+    time: asking it for zero buffers fails with EBUSY while another program has it, and changes nothing
+    otherwise."""
+    busy = []
+    for name, role in _cameras(sysfs):
+        try:
+            fd = os.open(f"{dev}/{name}", os.O_RDWR | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            fcntl.ioctl(fd, VIDIOC_REQBUFS, bytearray(struct.pack("<IIII4x", 0, 1, 1, 0)))  # count, capture, mmap
+        except OSError as e:
+            if e.errno == errno.EBUSY:
+                busy.append(role)
+        finally:
+            os.close(fd)
+    return busy
 
 
 def read_setup(path: str) -> dict | None:
@@ -450,6 +483,11 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
         snap["robot_page_age_s"] = round(time.monotonic() - robot_page_served[0], 1) if robot_page_served else None
         return web.json_response(snap)
 
+    async def cameras_busy(request: web.Request) -> web.Response:
+        if not authorized(request):
+            raise web.HTTPUnauthorized()
+        return web.json_response({"in_use": await asyncio.to_thread(cameras_in_use)})
+
     async def robot_ws(request: web.Request) -> web.WebSocketResponse:
         # The robot page owns the cameras and microphone, so only the robot itself may take that role.
         if not (is_local(request) or allow_remote_robot):
@@ -478,7 +516,8 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                     elif m.get("type") == "volumes":
                         await hub.volumes_from_robot(m)
                     elif m.get("type") == "cameras":
-                        log.info("robot page cameras: head=#%s nav=#%s, roles %s, labels %s", m.get("head"), m.get("nav"), m.get("roles"), m.get("all"))
+                        log.info("robot page cameras: head=#%s nav=#%s, found by opening each: %s, roles %s, labels %s",
+                                 m.get("head"), m.get("nav"), m.get("found"), m.get("roles"), m.get("all"))
                 except (ValueError, TypeError, KeyError):
                     pass
         finally:
@@ -651,6 +690,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                                                                      "Content-Type": "text/javascript"})
     app.router.add_get("/rocky-face.js", face_script)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/cameras-in-use", cameras_busy)
     app.router.add_get("/ws", ws_handler)
 
     if allow_remote_robot:

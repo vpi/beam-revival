@@ -8,7 +8,8 @@ Wants=beam-config.service
 [Service]
 User=beamsrv
 Group=beamsrv
-SupplementaryGroups=dialout
+# video: to tell which camera the robot page has open (cameras_in_use), never to capture
+SupplementaryGroups=dialout video
 # /var/lib/beam-server: remembers sleep mode across restarts ($STATE_DIRECTORY)
 StateDirectory=beam-server
 EnvironmentFile=-/etc/beam/server.env

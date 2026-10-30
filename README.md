@@ -101,7 +101,7 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.4` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.4.1` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one

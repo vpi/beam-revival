@@ -128,7 +128,8 @@
     // (both are just "M034-WDR"), so otherwise go by the server's list of roles in device order.
     let roles = [];
     try { roles = (await fetch("/api/status" + (q ? "?" + q : "")).then((r) => r.json())).cameras || []; } catch (e) { /* guess */ }
-    const byRole = (role) => (roles.length === cams.length ? cams[roles.indexOf(role)] : undefined);
+    const found = await identifyCameras(cams);
+    const byRole = (role) => found[role] || (roles.length === cams.length ? cams[roles.indexOf(role)] : undefined);
     const headCam = pick(params.get("head") || "25a1:0006", byRole("head") || cams[0]);
     const navCam = pick(params.get("nav") || "25a1:0007", byRole("nav") || cams.find((c) => c !== headCam));
 
@@ -144,7 +145,34 @@
         });
       } catch (e) { console.warn("nav camera unavailable", e); }
     }
-    return { head, nav, labels: { head: cams.indexOf(headCam), nav: cams.indexOf(navCam), roles, all: cams.map((c) => c.label) } };
+    return { head, nav, labels: { head: cams.indexOf(headCam), nav: cams.indexOf(navCam), roles,
+                                  found: Object.keys(found).map((r) => `${r}=#${cams.indexOf(found[r])}`).join(" ") || "none",
+                                  all: cams.map((c) => c.label) } };
+  }
+
+  // Which camera is which: open each one Chromium lists, alone, and ask the server which camera is now in use.
+  // Exact whatever order Chromium lists them in, and however many entries. {} when the server can't tell.
+  async function identifyCameras(cams) {
+    const inUse = async () => (await fetch("/api/cameras-in-use" + (q ? "?" + q : "")).then((r) => r.json())).in_use;
+    const idle = async () => {           // a closed camera takes a moment to be released
+      for (let i = 0; i < 20; i++) { if (!(await inUse()).length) return true; await new Promise((r) => setTimeout(r, 100)); }
+      return false;
+    };
+    const found = {};
+    try {
+      for (const c of cams) {
+        if (!(await idle())) break;
+        let s;
+        try { s = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: c.deviceId } } }); }
+        catch (e) { continue; }          // an entry that isn't a working camera
+        try {
+          const busy = await inUse();
+          if (busy.length === 1 && !found[busy[0]]) found[busy[0]] = c;
+        } finally { s.getTracks().forEach((t) => t.stop()); }
+      }
+      await idle();
+    } catch (e) { console.warn("couldn't tell the cameras apart", e); }
+    return found;
   }
 
   // Test mode: animated test patterns and a beeping tone instead of real devices.
