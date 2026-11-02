@@ -4,8 +4,9 @@ At 3 frames a second a waving hand can't be followed, but it lands somewhere new
 change beside a face (where a raised hand is) in most of the last few frames, while the person stays where they
 are (walking up to him moves the face) and the rest of the picture doesn't change (the robot turning, or a light
 switched on, changes all of it). A hand in front of the face often hides it from the face finder for a moment, so
-the face's last place is used for up to a second, but at least one of those frames must show the face (someone
-walking close by, face turned away, also changes a lot beside where their face was).
+the face's last place is used for up to a second. But someone walking past also changes a lot beside where their
+face was last seen, so a wave needs the face in sight and still in at least two of those frames, including the
+latest: a waver's face comes back where it was, a passer-by's doesn't.
 """
 
 from __future__ import annotations
@@ -82,8 +83,8 @@ class WaveDetector:
                  moving[top:bottom, x + w + w // 4:x + 3 * w]]
         self.last_score = max((float(z.mean()) for z in zones if z.size), default=0.0)
         self.hits.append(MISS if self.last_score <= ZONE_MOVING else SEEN if faces else HIDDEN)
-        # At least one hit with the face in sight and still: a person walking close, face turned away, isn't a wave.
-        if (sum(h != MISS for h in self.hits) >= NEEDED and SEEN in self.hits
+        # The face in sight and still now and at least once before: a person walking past, face lost, isn't a wave.
+        if (sum(h != MISS for h in self.hits) >= NEEDED and self.hits[-1] == SEEN and self.hits.count(SEEN) >= 2
                 and now - self.last_wave >= COOLDOWN_S):
             self.last_wave = now
             self.hits.clear()

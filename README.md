@@ -32,6 +32,9 @@ Tested on a real Beam+ (October 2026), running from a USB stick, with the robot'
   remotely from the driving page
 - Optional **phone panel**: a spare Android phone on the robot becomes a touch screen for people in
   the room, a rear camera with a light, and a "Call owner" button ([docs/phone.md](docs/phone.md))
+- Optional **sensors**: a 2D lidar and a low ultrasonic distance sensor give the driving page a live top
+  view of the surroundings and an **obstacle stop** that slows down and stops forward driving before it
+  hits something ([docs/sensors.md](docs/sensors.md))
 - Experimental, on a separate Linux computer (the "brain"): **face recognition** with spoken greetings
   ([docs/brain.md](docs/brain.md)), and **Rocky**, a personality with an animated face on the robot screen
   who answers out loud, typed to by drivers or spoken to in the room with "hey Rocky" (or a wave); he looks
@@ -94,6 +97,7 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 | Sleep mode (button) | **core**, tested | – | always available |
 | Nightly sleep schedule | optional, tested | – | `SLEEP_HOURS`, `TIMEZONE` in `beam.conf` |
 | Phone panel: touch screen for people in the room, rear camera and light, Call owner | optional, tested | a spare Android phone (USB-C, Chrome) | plug it in, see [docs/phone.md](docs/phone.md) |
+| Lidar (Surroundings view), ultrasonic distance sensor, obstacle stop | optional, tested on a Beam+ | Slamtec RPLIDAR C1; DFRobot A02YYUW with a CP2102 USB serial adapter; a powered USB hub in the base | plug them in, see [docs/sensors.md](docs/sensors.md) |
 | Face recognition and spoken greetings | **experimental**, tried on a Beam+ | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
 | Rocky: animated face, typed chat from drivers, "hey Rocky" or a wave in the room (only while nobody drives), sight when asked, Home Assistant control, editable personality | **experimental**, tried on a Beam+ | the brain, an AI provider API key; optional Fish Audio key for his voice, optional Home Assistant | see [docs/rocky.md](docs/rocky.md) |
 | AI driving | **experimental**, simulator only so far | the brain, plus an AI provider API key | see [docs/ai-driving.md](docs/ai-driving.md) |
@@ -101,7 +105,7 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.4.1` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.5` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one
@@ -115,6 +119,7 @@ package a newer release needs (the list is `image/packages.txt`), so the robot m
 |---|---|
 | `beamctl/protocol.py` | The motor board wire protocol: commands, status packets, STM32 CRC. Spec in [docs/motor-protocol.md](docs/motor-protocol.md). |
 | `beamctl/server.py` | **Motor server.** Runs on the robot, owns the motor board, and serves the driving page. Sends drive commands at 100 Hz, keeps the power watchdog refreshed, and enforces the safety rules. |
+| `beamctl/lidar.py`, `beamctl/rangefinder.py` | Optional **sensors**: the lidar and the ultrasonic distance sensor, found by their USB adapters' names. They feed the Surroundings view and the obstacle stop. See [docs/sensors.md](docs/sensors.md). |
 | `beamctl/sim.py` | **Simulator.** A fake motor board on a pseudo-terminal, so everything can be developed without the robot. |
 | `beamctl/web/index.html` | **Driving page.** Live video from both cameras, robot audio, Talk, keyboard (WASD/arrows), on-screen joystick, gamepad, e-stop, telemetry. Works on phones. |
 | `beamctl/web/robot.html` | **Robot screen.** Runs in a full-screen browser on the robot. Captures the cameras and microphone, plays the driver's voice, shows a friendly face. |
@@ -201,6 +206,7 @@ python3 -m pytest -q        # 116 tests, about a minute and a half
 - **Releasing every control** sends an explicit stop. Disconnecting the page also stops the robot immediately.
 - **E-stop:** the STOP button, `Space` or gamepad B. It stays latched until released on the page.
 - **Limits and ramps:** 0.6 m/s by default (`--max-linear`, capped at the board's 1.0), 1.0 rad/s, and smooth acceleration with faster braking.
+- **Obstacle stop** (with a lidar or the ultrasonic sensor): forward driving slows from 0.8 m and stops 0.25–0.3 m before an obstacle; backing up and turning stay free. A driver can switch it off for themselves only. See [docs/sensors.md](docs/sensors.md).
 - **One driver at a time:** a second page gets "another driver has control" while the first is active.
 - **Board link loss:** after 2 s of silence the server reopens the port and restarts from speed 0.
 - **Power watchdog:** on opening the port the server immediately sends Beam's "power-cycle in 300 s" order and re-sends it every 5 s. Without this, the robot powers off about 5 minutes after you boot your own OS (see the spec, section 6).

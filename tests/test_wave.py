@@ -62,6 +62,13 @@ def test_moving_close_with_the_face_hidden_is_not_a_wave():
     assert not any(d.update(frame(120 if i % 2 else 190), f, i / 3) for i, f in enumerate(faces))
 
 
+def test_walking_past_is_not_a_wave():
+    # From the robot: a face seen as someone walks by, then lost while their body moves through where it was.
+    d = WaveDetector()
+    faces = [[FACE], [FACE], [], [], [], [(40, 150, 80, 80)], []]
+    assert not any(d.update(frame(120 if i % 2 else 190), f, i / 3) for i, f in enumerate(faces))
+
+
 def test_frames_too_far_apart_are_not_compared():
     d = WaveDetector()
     assert not any(d.update(frame(120 if i % 2 else 190), [FACE], i * 2.0) for i in range(12))

@@ -227,7 +227,7 @@ class Brain:
             await self.send({"type": "seen", "names": names})
 
     async def greet(self, text: str) -> None:
-        log.info("greeting: %s", text)
+        log.info("greeting someone")                  # never the words: they hold the person's name
         if self.rocky is not None:
             await self.rocky_say(text, "happy")      # Rocky's on: he says hello himself
             return

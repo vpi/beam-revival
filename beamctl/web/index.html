@@ -85,6 +85,7 @@
   .linkbtn { border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: 6px;
              padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
   .hiddenCard { display: none; }
+  #lidarView { width: 100%; max-width: 280px; aspect-ratio: 1; display: block; margin: 6px auto 0; }
   /* The AI is in charge: its own colour everywhere, never mistaken for a person. */
   :root { --ai: #7c4dff; }
   .ai-banner { position: absolute; top: 0; left: 0; right: 0; z-index: 3; background: var(--ai); color: #fff;
@@ -189,7 +190,17 @@
       <div class="joy-wrap"><div class="joy" id="joy"><div class="knob" id="knob"></div></div></div>
       <div class="row"><span>Speed limit</span><span class="num" id="speedLabel">50%</span></div>
       <input id="speed" type="range" min="10" max="100" step="5" value="50">
+      <div class="row hiddenCard" id="obstacleRow"><span>Obstacle stop</span>
+        <label><input type="checkbox" id="obstacleStop" checked> <span id="obstacleText">on</span></label></div>
       <p class="help"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows to drive, <kbd>Space</kbd> to stop. A gamepad works too. Releasing every control stops the robot.</p>
+    </div>
+
+    <div class="card hiddenCard" id="lidarCard">
+      <h2>Surroundings</h2>
+      <canvas id="lidarView" width="560" height="560"></canvas>
+      <div class="row"><span>Lidar</span><span class="num" id="lidarState">—</span></div>
+      <p class="help">Seen from above, front up; rings every metre. Dots: the lidar. Grey slice: hidden by the mast.
+        Orange arc: the low distance sensor in front.</p>
     </div>
 
     <div class="card">
@@ -201,6 +212,7 @@
       <div class="row"><span>Turn rate</span><span class="num" id="turn">—</span></div>
       <div class="row"><span>Heading</span><span class="num" id="yaw">—</span></div>
       <div class="row"><span>Motors</span><span id="motors">—</span></div>
+      <div class="row hiddenCard" id="rangeRow"><span>Distance sensor</span><span class="num" id="range">—</span></div>
       <div class="row"><span>Mode</span><span id="sleepState">—</span></div>
       <button class="linkbtn" id="sleepBtn" title="Cameras, microphone, screen off until woken from this page">🌙 Put to sleep</button>
     </div>
@@ -600,6 +612,22 @@
   // ---------- inputs ----------
   const scale = () => Number($("speed").value) / 100;
   $("speed").addEventListener("input", () => { $("speedLabel").textContent = $("speed").value + "%"; });
+  $("obstacleStop").addEventListener("change", (e) => {
+    const on = e.target.checked;
+    if (!on && !confirm("Turn off the obstacle stop? The robot will then drive into whatever is in front of it. " +
+                        "It's only off while you drive, and back on when you leave this page.")) {
+      e.target.checked = true;
+      return;
+    }
+    send({ type: "obstacle_stop", on });
+  });
+  function obstacleText(O, mine) {
+    if (mine) return "OFF";
+    if (O.blind) return "on · sensor silent, crawling";
+    if (O.max_forward <= 0) return `on · blocked, ${(O.gap_m ?? 0).toFixed(2)} m ahead`;
+    if (O.gap_m != null && O.max_forward < last.drive.max_linear) return `on · slowing, ${O.gap_m.toFixed(2)} m ahead`;
+    return "on · clear";
+  }
 
   const KEYMAP = { KeyW: [1, 0], ArrowUp: [1, 0], KeyS: [-1, 0], ArrowDown: [-1, 0],
                    KeyA: [0, 1], ArrowLeft: [0, 1], KeyD: [0, -1], ArrowRight: [0, -1] };
@@ -677,6 +705,40 @@
     if (confirm("Put Beam to sleep? Its cameras, microphone and screen turn off until someone wakes it from this page."))
       send({ type: "sleep" });
   });
+  // The lidar's latest turn (nearest hit per few degrees, cm), front up, plus the low distance sensor in front.
+  const LIDAR_M = 3;                                   // metres from the centre to the edge
+  function drawLidar(L, R) {
+    $("lidarCard").classList.toggle("hiddenCard", !L);
+    if (!L) return;
+    $("lidarState").textContent = !L.spinning ? "stopped (asleep)" : !L.fresh ? "starting…" : `${L.hz.toFixed(1)} turns/s`;
+    const cv = $("lidarView"), g = cv.getContext("2d"), css = getComputedStyle(document.body);
+    const col = (v) => css.getPropertyValue(v).trim();
+    const W = cv.width, c = W / 2, k = c / LIDAR_M;
+    const at = (deg, m) => [c + m * k * Math.sin(deg * Math.PI / 180), c - m * k * Math.cos(deg * Math.PI / 180)];
+    const arc = (deg) => (deg - 90) * Math.PI / 180;  // canvas angles start at 3 o'clock
+    g.clearRect(0, 0, W, W);
+    if (L.mask) {
+      g.fillStyle = col("--line");
+      g.beginPath(); g.moveTo(c, c); g.arc(c, c, c, arc(L.mask[0]), arc(L.mask[1])); g.closePath(); g.fill();
+    }
+    g.strokeStyle = col("--line"); g.lineWidth = 2;
+    for (let r = 1; r <= LIDAR_M; r++) { g.beginPath(); g.arc(c, c, r * k, 0, 2 * Math.PI); g.stroke(); }
+    if (R && R.fresh && R.m != null && R.m <= LIDAR_M) {
+      g.strokeStyle = col("--warn"); g.lineWidth = 6;
+      g.beginPath(); g.arc(c, c, R.m * k, arc(-15), arc(15)); g.stroke();
+    }
+    if (L.cm) {
+      g.fillStyle = col("--accent");
+      L.cm.forEach((cm, i) => {
+        if (!cm || cm / 100 > LIDAR_M) return;
+        const [x, y] = at((i + 0.5) * L.bin_deg, cm / 100);
+        g.beginPath(); g.arc(x, y, 5, 0, 2 * Math.PI); g.fill();
+      });
+    }
+    g.fillStyle = col("--text");                       // the robot, pointing forward
+    g.beginPath(); g.moveTo(c, c - 18); g.lineTo(c + 12, c + 12); g.lineTo(c - 12, c + 12); g.closePath(); g.fill();
+  }
+
   function renderSleep(S) {
     S = S || {};
     $("sleepOv").classList.toggle("show", !!S.asleep);
@@ -698,6 +760,9 @@
     let msg = null;
     if (D && D.estop) msg = ["E-STOP ENGAGED", "bad"];
     else if (connected && L && !L.connected) msg = ["Motor board not responding", "warn"];
+    else if (last && last.obstacle_off_by_you) msg = ["Obstacle stop OFF: nothing stops you driving into things", "warn"];
+    else if (D && D.obstacle && last.you_have_control && D.obstacle.active && D.obstacle.max_forward <= 0)
+      msg = [`Obstacle ${(D.obstacle.gap_m ?? 0).toFixed(2)} m ahead: forward blocked (back up or turn)`, "warn"];
     else if (Date.now() < flashUntil) msg = flashMsg;
     if (msg) { b.textContent = msg[0]; b.className = "banner show " + msg[1]; }
     else b.className = "banner";
@@ -714,6 +779,12 @@
     else setLink(true);
 
     renderSleep(m.sleep);
+    const O = D.obstacle;
+    $("obstacleRow").classList.toggle("hiddenCard", !(O && O.sensors));
+    if (O && O.sensors) {
+      if (document.activeElement !== $("obstacleStop")) $("obstacleStop").checked = !m.obstacle_off_by_you;
+      $("obstacleText").textContent = obstacleText(O, m.obstacle_off_by_you);
+    }
     estop = D.estop;
     const st = $("estop");
     st.textContent = D.estop ? "STOPPED · tap to release" : "STOP";
@@ -730,6 +801,10 @@
     $("errors").textContent = `${L.timeouts} / ${L.crc_errors}`;
     $("watchdog").textContent = L.watchdog_age_s == null ? "—" : `refreshed ${L.watchdog_age_s.toFixed(1)} s ago`;
     $("version").textContent = m.version || "—";
+    const R = m.range;                  // the ultrasonic sensor, when one is plugged in
+    $("rangeRow").classList.toggle("hiddenCard", !R);
+    if (R) $("range").textContent = !R.fresh ? "no data" : R.m == null ? "nothing in range" : `${R.m.toFixed(2)} m`;
+    drawLidar(m.lidar, R);
     if (!B) return;
     const pct = B.battery_percent;
     $("battBar").style.width = (pct ?? 0) + "%";

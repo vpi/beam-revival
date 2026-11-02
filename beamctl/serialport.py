@@ -10,13 +10,15 @@ import termios
 from typing import Callable
 
 
-def configure_raw(fd: int) -> None:
-    """Raw 8N1, no echo, no flow control. Baud rate is irrelevant for USB CDC-ACM."""
+def configure_raw(fd: int, baud: int | None = None) -> None:
+    """Raw 8N1, no echo, no flow control. Baud rate is irrelevant for USB CDC-ACM (None: leave it)."""
     attrs = termios.tcgetattr(fd)
     attrs[0] = termios.IGNPAR                                  # iflag
     attrs[1] = 0                                               # oflag
     attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL    # cflag
     attrs[3] = 0                                               # lflag
+    if baud is not None:                                       # a real UART, e.g. behind a USB serial adapter
+        attrs[4] = attrs[5] = getattr(termios, f"B{baud}")
     attrs[6][termios.VMIN] = 1
     attrs[6][termios.VTIME] = 0
     termios.tcflush(fd, termios.TCIFLUSH)
@@ -26,8 +28,10 @@ def configure_raw(fd: int) -> None:
 class SerialPort:
     """Non-blocking serial port that hands received bytes to a callback on the event loop."""
 
-    def __init__(self, path: str, on_data: Callable[[bytes], None], on_lost: Callable[[Exception], None]):
+    def __init__(self, path: str, on_data: Callable[[bytes], None], on_lost: Callable[[Exception], None],
+                 baud: int | None = None):
         self.path = path
+        self.baud = baud
         self._on_data = on_data
         self._on_lost = on_lost
         self._fd: int | None = None
@@ -42,7 +46,7 @@ class SerialPort:
         try:
             # Exclusive lock, like Beam's fcntl(F_SETLK): refuse to share the board with another process.
             fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            configure_raw(fd)
+            configure_raw(fd, self.baud)
         except Exception:
             os.close(fd)
             raise
