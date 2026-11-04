@@ -90,9 +90,15 @@ class Lidar:
     def __init__(self, device: str = "auto", mask: str | None = None, rotation: float = 0.0,
                  should_spin: Callable[[], bool] = lambda: True):
         self.device = device                   # a serial port path, or "auto" (the first CP2102N)
-        self.mask = parse_mask(mask)
+        try:
+            self.mask = parse_mask(mask)
+        except ValueError:
+            # Never let a typo stop the motor server: without it the board powers the robot off.
+            log.error("lidar mask %r not understood (e.g. 135-210); running without one", mask)
+            self.mask = None
         self.rotation = rotation               # degrees to add if the arrow isn't to the front
         self.should_spin = should_spin         # False while the robot sleeps
+        self.expected = bool(device) and device != "auto"   # as RangeSensor.expected: see `lost`
         self.port: SerialPort | None = None
         self.parser = ScanParser()
         self.spinning = False
@@ -151,6 +157,7 @@ class Lidar:
                     try:
                         self.port.open()
                         log.info("lidar at %s", path)
+                        self.expected = True
                     except OSError as e:
                         if str(e) != self._last_error:          # once, not every retry
                             log.warning("cannot open lidar %s: %s", path, e)
@@ -187,6 +194,20 @@ class Lidar:
         log.warning("lidar gone: %s", exc)
         self.spinning, self.points = False, []
 
+    @property
+    def present(self) -> bool:
+        return self.port is not None and self.port.is_open
+
+    @property
+    def lost(self) -> bool:
+        """It was there (or was named) and isn't now. Stays so until it's back."""
+        return self.expected and not self.present
+
+    @property
+    def fresh(self) -> bool:
+        """A complete turn came lately (cheap: the obstacle stop asks 100 times a second)."""
+        return self.spinning and time.monotonic() - self.at < STALE_S
+
     def bins(self) -> list[int]:
         """The nearest hit per BIN_DEG degrees, in cm, from straight ahead clockwise; 0 = nothing (or hidden)."""
         out = [0] * (360 // BIN_DEG)
@@ -197,11 +218,23 @@ class Lidar:
                 out[i] = cm
         return out
 
+    def scan(self) -> dict | None:
+        """The latest turn in finer steps, for the brain's map: the mean distance per degree in cm, from straight
+        ahead clockwise (0 = nothing, or hidden), and which turn it is. None while it isn't fresh."""
+        if not self.fresh:
+            return None
+        total, count = [0.0] * 360, [0] * 360
+        for a, d in self.points:
+            i = int(a) % 360
+            total[i] += d
+            count[i] += 1
+        return {"turn": self.turns, "cm": [round(t * 100 / c) if c else 0 for t, c in zip(total, count)]}
+
     def snapshot(self) -> dict | None:
         """None without a lidar. Else whether it spins, turns per second, the hidden slice and the latest turn."""
-        if self.port is None or not self.port.is_open:
+        if not self.present:
             return None
-        fresh = self.spinning and time.monotonic() - self.at < STALE_S
+        fresh = self.fresh
         return {"spinning": self.spinning, "fresh": fresh,
                 "hz": round(len(self._turn_times) / 2.0, 1) if fresh else 0.0,      # turns in the last 2 s
                 "mask": list(self.mask) if self.mask else None, "bin_deg": BIN_DEG,

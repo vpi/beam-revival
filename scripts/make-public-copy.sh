@@ -59,7 +59,7 @@ found=0
 for text in "${PRIVATE[@]}"; do
   grep -rnIF --exclude-dir=.git -- "$text" "$DEST" && found=1
 done
-grep -rnI -E 'tskey-|BEGIN [A-Z ]*PRIVATE KEY|WIFI_PASSWORD=[^(\r]|TAILSCALE_AUTHKEY=[^(\r]|^BRAIN_KEY=[A-Za-z0-9]' \
+grep -rnI -E 'tskey-|BEGIN [A-Z ]*PRIVATE KEY|WIFI_PASSWORD=[^(\r]|TAILSCALE_AUTHKEY=[^(\r]|^(BEAM_)?BRAIN_KEY=[A-Za-z0-9]|^BEAM_TOKEN=[A-Za-z0-9]' \
   --exclude-dir=.git --exclude=make-public-copy.sh "$DEST" && found=1
 [ "$found" = 0 ] && echo "(nothing found)"
 exit 0

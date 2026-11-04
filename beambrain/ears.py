@@ -191,25 +191,39 @@ class Segmenter:
         return np.concatenate(turn)
 
 
+def stt_prompt(places: list[str]) -> str:
+    """Whisper's starting context: his name, and the places he can be sent to, as someone would say them."""
+    return STT_PROMPT + "".join(f" Go to the {p}." for p in places[:15])
+
+
 class Transcriber:
     def __init__(self, models_dir: Path):
         from faster_whisper import WhisperModel
         self.model = WhisperModel(STT_MODEL, device="cpu", compute_type="int8", revision=STT_REVISION,
                                   download_root=str(Path(models_dir) / "whisper"))
+        self.prompt = STT_PROMPT
 
     def __call__(self, audio: np.ndarray) -> str:
         segments, _ = self.model.transcribe(audio, language="en", beam_size=1, vad_filter=True,
-                                            initial_prompt=STT_PROMPT)
+                                            initial_prompt=self.prompt)
         return " ".join(s.text.strip() for s in segments).strip()
 
 
 # --- the wake word -----------------------------------------------------------------------
 
-# How Whisper writes "hey" and "Rocky" (it also runs them together: "Hirocky").
-WAKE_GREETINGS = ["hey", "hay", "hei", "hi", "a", "okay", "ok", "oh"]
-WAKE_NAMES = ["rocky", "rockey", "rockie", "rocki", "roki", "rokey", "rocco", "rocket", "rocking", "ricky", "roxy"]
+# How Whisper writes "hey" and "Rocky" (it also runs them together: "Hirocky"). Not "a" or "oh" as the greeting
+# ("we had a rocky start"), nor other people's names it sometimes hears instead ("hi Ricky" is for Ricky).
+# "Rocket" and "rocking" stay: they're common words, but only wake him straight after a greeting, said first.
+WAKE_GREETINGS = ["hey", "hay", "hei", "hi", "okay", "ok"]
+WAKE_NAMES = ["rocky", "rockey", "rockie", "rocki", "roki", "rokey", "rocket", "rocking"]
+# Sounds people make before they get to it: "um, hey Rocky", "oh, hi Rocky", "okay, hey Rocky".
+_FILLER = r"(?:(?:um+|uh+|er+|erm|hm+|oh|ah|okay|ok|so|well)\W+)*"
 _NAME = r"(?:" + "|".join(WAKE_NAMES) + r")"
-_WAKE_RE = re.compile(r"\b(?:" + "|".join(WAKE_GREETINGS) + r")\W*" + _NAME + r"\b[\s,.!?:;-]*", re.IGNORECASE)
+_RUN_TOGETHER = r"(?:rocky|rockey|rockie|rocki)"    # "Hirocky", but not "Hiroki", someone's name
+# Only at the start of what was said (or of a sentence in it), so "a rocket launch on TV" doesn't count; and the
+# greeting and the name in the same sentence ("Okay. Rocking chair there." isn't for him).
+_WAKE_RE = re.compile(r"(?:^|[.!?])\W*" + _FILLER + r"(?:" + "|".join(WAKE_GREETINGS) + r")(?:[\s,-]+" + _NAME
+                      + "|" + _RUN_TOGETHER + r")\b[\s,.!?:;-]*", re.IGNORECASE)
 _NAME_ONLY_RE = re.compile(r"^\W*" + _NAME + r"\W*$", re.IGNORECASE)    # "Rocky?" on its own: he's being called
 _NAME_RE = re.compile(r"\b" + _NAME + r"\b", re.IGNORECASE)
 AWAKE_S = 60.0       # after "hey Rocky", no need to say his name again for this long
@@ -217,8 +231,9 @@ AWAKE_S = 60.0       # after "hey Rocky", no need to say his name again for this
 
 class Wake:
     """Whether something heard is meant for Rocky. Returns ("ignore", ""), ("wake", "") for his name alone,
-    or ("chat", words to answer). His name inside a sentence, without "hey", doesn't wake him (too easy to say
-    by chance); his name said on its own does."""
+    or ("chat", words to answer). "Hey Rocky" wakes him when it starts what was said (or a sentence in it); his
+    name further into a sentence, with or without "hey", doesn't (too easy to say by chance); his name said on
+    its own does."""
 
     def __init__(self, awake_s: float = AWAKE_S):
         self.awake_s, self.until = awake_s, 0.0
@@ -265,6 +280,7 @@ class Ears:
         self.models_dir, self.on_text = Path(models_dir), on_text
         self.loop = loop
         self.segmenter, self.transcriber = segmenter, transcriber
+        self._hint: list[str] = []
         self.q: queue.Queue = queue.Queue(maxsize=200)        # ~20 s of audio; dropped beyond that
         self.thread = threading.Thread(target=self._run, name="ears", daemon=True)
 
@@ -274,6 +290,13 @@ class Ears:
             self.segmenter = Segmenter(SileroVAD(self.models_dir), SmartTurn(self.models_dir))
         if self.transcriber is None:
             self.transcriber = Transcriber(self.models_dir)
+        self.hint(self._hint)
+
+    def hint(self, places: list[str]) -> None:
+        """Words to expect: the map's place names (whisper hears what it expects far better, accents too)."""
+        self._hint = list(places)
+        if isinstance(self.transcriber, Transcriber):
+            self.transcriber.prompt = stt_prompt(self._hint)
 
     def start(self) -> None:
         self.loop = self.loop or asyncio.get_running_loop()

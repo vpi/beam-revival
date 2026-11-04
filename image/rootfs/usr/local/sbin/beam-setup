@@ -19,20 +19,27 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 CONF = Path("/boot/efi/beam.conf")
 STATE = Path("/var/lib/beam")
 SETUP = Path("/run/beam/setup.json")
 SERVER_ENV = Path("/etc/beam/server.env")
 KIOSK_URL = Path("/etc/beam/kiosk-url")
+SCREEN_KEY = Path("/run/beam/screen-key")
+AUTHORIZED_KEYS = Path("/home/beam/.ssh/authorized_keys")
 TS_KEY = STATE / "tailscale-authkey"
+STAND_IN_TOKEN = STATE / "stand-in-token"
 SAVED = "(saved on robot)"
+TOKEN_RE = r"[A-Za-z0-9_-]{8,128}"         # safe on the server's command line and in URLs as is
+SAFE_SPEED = 0.3                           # m/s when MAX_SPEED isn't understood: slow, never the 0.6 default
 
 
 def log(msg: str) -> None:
@@ -99,6 +106,91 @@ def mark_saved(lines: list[str], names: set[str]) -> None:
     os.sync()
 
 
+def access_token(conf: dict[str, str]) -> str | None:
+    """ACCESS_TOKEN from beam.conf: "" when unset, None when set but unusable.
+
+    Only letters, digits, - and _ are accepted: a space or quote would garble the server's settings file
+    (it then may fail to start, and nothing refreshes the board's power watchdog), and + & # % break URLs."""
+    token = conf.get("ACCESS_TOKEN", "")
+    return token if not token or re.fullmatch(TOKEN_RE, token) else None
+
+
+def screen_key() -> str:
+    """This boot's key for the robot screen and the phone panel, new every boot (/run is emptied at boot).
+
+    Without it, anything that reaches 127.0.0.1 could take the robot or panel role: another app on the panel
+    phone reaches the robot's port 8080 through adb reverse. The same key all boot, so re-applying beam.conf
+    doesn't cut off the screen or the phone."""
+    try:
+        key = SCREEN_KEY.read_text().strip()
+        if re.fullmatch(TOKEN_RE, key):
+            return key
+    except OSError:
+        pass
+    key = secrets.token_urlsafe(24)
+    SCREEN_KEY.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+    write_private(SCREEN_KEY, key)
+    return key
+
+
+def stand_in_token() -> str:
+    """A random page token kept on the robot, used while ACCESS_TOKEN is unusable.
+
+    The same one every boot, so the robot screen's saved URL keeps working."""
+    try:
+        token = STAND_IN_TOKEN.read_text().strip()
+        if re.fullmatch(TOKEN_RE, token):
+            return token
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(24)
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    STAND_IN_TOKEN.write_text(token)
+    STAND_IN_TOKEN.chmod(0o600)
+    return token
+
+
+def max_speed(conf: dict[str, str]) -> tuple[float, str | None]:
+    """Top speed in m/s from MAX_SPEED (kept within 0.1-1.0), and a message for the robot screen.
+
+    Empty means the 0.6 default. Anything else that isn't a plain number (a typo, a decimal comma
+    like 0,3) gives the slow SAFE_SPEED, never something faster than asked for."""
+    raw = conf.get("MAX_SPEED", "")
+    if not raw:
+        return 0.6, None
+    if not re.fullmatch(r"\d+(\.\d*)?|\.\d+", raw):
+        return SAFE_SPEED, f"MAX_SPEED not understood (use a number like 0.3): driving at {SAFE_SPEED} m/s"
+    return min(1.0, max(0.1, float(raw))), None
+
+
+def write_private(path: Path, text: str) -> None:
+    """Write a file only root can read (systemd reads EnvironmentFile= as root), never readable on the way."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    tmp.replace(path)
+
+
+def write_authorized_keys(keys: list[str]) -> None:
+    """SSH keys for the admin user, rewritten every boot: deleting the last SSH_KEY line revokes it too."""
+    new = "".join(k + "\n" for k in keys)
+    try:
+        old = AUTHORIZED_KEYS.read_text()
+    except OSError:
+        old = None
+    ssh = AUTHORIZED_KEYS.parent
+    ssh.mkdir(mode=0o700, exist_ok=True)
+    AUTHORIZED_KEYS.write_text(new)
+    AUTHORIZED_KEYS.chmod(0o600)
+    shutil.chown(ssh, "beam", "beam")
+    shutil.chown(AUTHORIZED_KEYS, "beam", "beam")
+    if old != new and (old or new):
+        log(f"SSH keys for user beam changed: {len(keys)} key(s) allowed now")
+
+
 def cmd_config() -> None:
     conf, ssh_keys, lines = read_conf()
     if not lines:
@@ -150,13 +242,19 @@ def cmd_config() -> None:
         secrets_saved.add("TAILSCALE_AUTHKEY")
 
     # Motor server options
-    token = conf.get("ACCESS_TOKEN", "")
-    try:
-        speed = min(1.0, max(0.1, float(conf.get("MAX_SPEED", "0.6"))))
-    except ValueError:
-        speed = 0.6
+    token = access_token(conf)
+    if token is None:
+        # It was meant as a lock, so don't silently drop it: lock the server with a random token that
+        # only the robot screen knows (through kiosk-url) until beam.conf is fixed.
+        messages.append("ACCESS_TOKEN must be 8+ letters, digits, - or _: nobody can drive until it's fixed")
+        token = stand_in_token()
+    speed, problem = max_speed(conf)
+    if problem:
+        messages.append(problem)
     host = "0.0.0.0" if conf.get("LAN_ACCESS", "no").lower() in ("yes", "true", "1") else "127.0.0.1"
-    args = f"--host {host} --max-linear {speed}" + (f" --token {token}" if token else "")
+    args = f"--host {host} --max-linear {speed}"
+    # Secrets go in their own variables, not BEAM_ARGS: a command line is readable by every program on the robot.
+    env = {"BEAM_TOKEN": token} if token else {}
     sleep_hours = conf.get("SLEEP_HOURS", "").replace(" ", "")
     if sleep_hours:
         if re.fullmatch(r"\d{1,2}:\d{2}-\d{1,2}:\d{2}", sleep_hours):
@@ -174,27 +272,31 @@ def cmd_config() -> None:
     brain_key = conf.get("BRAIN_KEY", "")
     if brain_key:
         if re.fullmatch(r"[A-Za-z0-9_-]{16,128}", brain_key):
-            args += f" --brain-key {brain_key}"
+            env["BEAM_BRAIN_KEY"] = brain_key
         else:
             messages.append("BRAIN_KEY must be 16+ letters, digits, - or _")
-    SERVER_ENV.parent.mkdir(parents=True, exist_ok=True)
+    skey = screen_key()
+    env["BEAM_SCREEN_KEY"] = skey
     old = SERVER_ENV.read_text() if SERVER_ENV.exists() else ""
-    new = f"BEAM_ARGS={args}\n"
-    SERVER_ENV.write_text(new)
-    SERVER_ENV.chmod(0o640)
-    KIOSK_URL.write_text("http://localhost:8080/robot" + (f"?token={token}" if token else "") + "\n")
+    new = f"BEAM_ARGS={args}\n" + "".join(f"{k}={v}\n" for k, v in env.items())
+    write_private(SERVER_ENV, new)
+    # Only the robot screen's user (and root) may read the token and screen key in it.
+    query = (f"token={quote(token, safe='')}&" if token else "") + f"screen_key={skey}"
+    write_private(KIOSK_URL, f"http://localhost:8080/robot?{query}\n")
+    try:
+        shutil.chown(KIOSK_URL, "kiosk")
+    except (LookupError, OSError) as e:
+        log(f"couldn't hand {KIOSK_URL} to the kiosk user: {e}")
     if old and (old != new or tz_changed):
         # --no-block: beam-server is ordered After= this unit, so waiting here would deadlock.
         run("systemctl", "--no-block", "try-restart", "beam-server.service", check=False)
 
-    # SSH keys for the admin user
-    if ssh_keys:
-        ssh = Path("/home/beam/.ssh")
-        ssh.mkdir(mode=0o700, exist_ok=True)
-        (ssh / "authorized_keys").write_text("\n".join(ssh_keys) + "\n")
-        (ssh / "authorized_keys").chmod(0o600)
-        shutil.chown(ssh, "beam", "beam")
-        shutil.chown(ssh / "authorized_keys", "beam", "beam")
+    # A beam.conf with no settings at all (empty, or truncated by a failed save) mustn't lock SSH out: only a
+    # real config decides the keys.
+    if conf or ssh_keys:
+        write_authorized_keys(ssh_keys)
+    else:
+        log("beam.conf has no settings: SSH keys left as they were")
 
     if secrets_saved:
         mark_saved(lines, secrets_saved)
@@ -214,15 +316,26 @@ def ts_status() -> dict:
 def cmd_tailscale() -> None:
     conf, _, _ = read_conf()
     name = re.sub(r"[^a-z0-9-]", "", conf.get("ROBOT_NAME", "beam").lower()) or "beam"
-    token = conf.get("ACCESS_TOKEN", "")
+    token = access_token(conf) or ""           # an unusable one: no token in the URL (the config message says why)
     login: subprocess.Popen | None = None
     login_started = 0.0
+    up_tried = 0.0
 
     while True:
         st = ts_status()
         state = st.get("BackendState")
         if state == "Running":
             break
+        if state == "Stopped" and time.time() - up_tried > 60:
+            # After a manual `tailscale down`: bring it back up. If it needs a login, the state turns
+            # NeedsLogin and the login link below takes over.
+            up_tried = time.time()
+            try:
+                r = run("tailscale", "up", f"--hostname={name}", check=False, timeout=60)
+                if r.returncode != 0:
+                    log(f"tailscale up failed: {r.stderr.strip()[:200]}")
+            except subprocess.TimeoutExpired:
+                log("tailscale up timed out; trying again")
         if state == "NeedsLogin":
             if TS_KEY.exists():
                 key = TS_KEY.read_text().strip()
@@ -250,7 +363,7 @@ def cmd_tailscale() -> None:
                      f"{r.stderr.strip()[:200]}")
         sys.exit(1)
     dns = ts_status().get("Self", {}).get("DNSName", "").rstrip(".")
-    url = f"https://{dns}/" + (f"?token={token}" if token else "")
+    url = f"https://{dns}/" + (f"?token={quote(token, safe='')}" if token else "")
     note(url=url)
     log(f"Robot published at {url}")
 
@@ -302,7 +415,9 @@ def cmd_backup() -> None:
         log("not backing up")
         return
     size = int(d["size"])
-    dest.mkdir(parents=True, exist_ok=True)
+    # Root only: it likely holds the original install's Wi-Fi passwords and certificates.
+    dest.mkdir(mode=0o700, parents=True, exist_ok=True)
+    dest.chmod(0o700)
     if shutil.disk_usage(dest).free < size:
         log(f"not enough space for a backup of {d['name']} ({size >> 20} MiB)")
         return
@@ -310,7 +425,7 @@ def cmd_backup() -> None:
     out = dest / f"{label}.img.zst"
     part = out.with_suffix(".part")
     log(f"backing up /dev/{d['name']} ({size >> 20} MiB) to {out}")
-    with open(part, "wb") as f:
+    with os.fdopen(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as f:
         dd = subprocess.Popen(["dd", f"if=/dev/{d['name']}", "bs=4M", "iflag=direct", "status=none"],
                               stdout=subprocess.PIPE)
         zs = subprocess.run(["zstd", "-T0", "-3", "-q", "-c"], stdin=dd.stdout, stdout=f)
@@ -519,7 +634,7 @@ def cmd_phone() -> None:
                 # each time (a hidden older panel tab would compete for the panel role and the camera).
                 adb("shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", url,
                     "--es", "com.android.browser.application_id", "beam-panel", "com.android.chrome")
-                log(f"panel page opened on the phone ({url})")
+                log("panel page opened on the phone")            # not the URL: it can hold the token
                 shown = True
         time.sleep(5)
 

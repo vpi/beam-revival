@@ -96,3 +96,23 @@ async def test_no_lidar_nothing_shown(monkeypatch):
     await asyncio.sleep(0.05)
     assert lid.snapshot() is None
     await lid.stop()
+
+
+def test_fine_scan_for_the_map():
+    """The brain's map gets every degree (the mean distance in it), not the driving page's nearest per 2."""
+    import time
+    lid = Lidar(device=None)
+    lid.spinning, lid.at, lid.turns = True, time.monotonic(), 7
+    lid.points = [(0.2, 1.0), (0.8, 1.2), (90.5, 2.0), (359.9, 0.5)]
+    s = lid.scan()
+    assert s["turn"] == 7 and len(s["cm"]) == 360
+    assert (s["cm"][0], s["cm"][90], s["cm"][359], s["cm"][45]) == (110, 200, 50, 0)
+    lid.at -= 10
+    assert lid.scan() is None                                     # stale
+
+
+def test_a_mask_it_cannot_read_is_ignored_not_fatal():
+    """A typo in --lidar-mask must not stop the motor server (without it the board powers the robot off)."""
+    for bad in ("-30-30", "135–210", "135", "front"):
+        assert Lidar(device=None, mask=bad).mask is None
+    assert Lidar(device=None, mask="135-210").mask == (135.0, 210.0)

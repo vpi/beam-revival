@@ -38,6 +38,10 @@ the driving page's Robot card shows the distance while it's there. `--range-devi
 
 The adapter is a plain CP2102, not a CP2102N: the RPLIDAR C1's adapter is a CP2102N and is left alone.
 
+A reading under 3 cm (inside the sensor's blind zone) counts as something touching the front, not as a clear
+way; 0 is the sensor's "no echo". We haven't yet checked on hardware what it reports that close: if it turns
+out to report 0, a box pushed against it reads as clear, and only the lidar sees it.
+
 Mount it low at the front, about 5 to 10 cm above the floor and tilted up a few degrees, so it sees low
 things the lidar passes over (a box, shoes) and glass. Its beam is wide: if the reading jumps about with
 nothing in front, it's seeing the floor; tilt it up a little more.
@@ -56,13 +60,14 @@ stops it in sleep mode. The driving page then has a **Surroundings** card: a top
 lidar's hits, the slice the mast hides, and the ultrasonic sensor's reading as an arc in front. Nothing is
 recorded; only the latest turn is kept.
 
-On our Beam+ the mast is 7 cm behind the lidar and hides **135° to 210°** (clockwise from straight ahead),
+On our Beam+ the lidar's centre is 6 cm behind the base's front edge (3.5 cm ahead of the wheels' axle), and
+the mast, 7 cm behind the lidar, hides **135° to 210°** (clockwise from straight ahead),
 which the server leaves out. Settings, if yours differs:
 
 | Option | Default | |
 |---|---|---|
 | `--lidar-device` | `auto` | a serial port path, or `none` to turn it off |
-| `--lidar-mask` | `135-210` | degrees to leave out; `''` for none |
+| `--lidar-mask` | `135-210` | degrees to leave out; `''` for none (one it can't read is logged and ignored) |
 | `--lidar-rotation` | `0` | degrees to add if the arrow doesn't point to the front |
 
 To find the mask for another mounting: point it as above, look at which directions show hits only a few
@@ -75,6 +80,9 @@ beyond 0.8 m, slowing down closer, and no forward motion from 0.25 m (gaps in fr
 edge). The lidar counts only what's in the robot's path, not things beside it; the ultrasonic sensor sees
 what's lower than the lidar. Backing away and turning are never limited, so you can always get out. If a
 connected sensor goes silent, forward is held to a crawl (0.1 m/s). It applies to every driver, the AI too.
+The same crawl holds if a sensor disappears after it was seen (unplugged, a USB reset, the hub dropping out),
+until it's back; the status then says `"lost": true`. A sensor named with `--range-device PATH` or
+`--lidar-device PATH` is expected from the start, so without it the robot crawls from boot.
 
 The driving page's Drive card shows it ("clear", "slowing", "blocked") and has a switch to turn it off. Off
 is for that driver only, with a warning banner while it lasts, and it's on again when they leave the page.

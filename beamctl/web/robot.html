@@ -89,7 +89,10 @@
   const token = params.get("token");
   const TEST = params.has("test");
   const q = token ? "token=" + encodeURIComponent(token) : "";
-  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?role=robot${q ? "&" + q : ""}`;
+  // This boot's screen key (in the kiosk's URL): only the robot's own screen may take the robot role.
+  const screenKey = params.get("screen_key");
+  const sk = screenKey ? "&screen_key=" + encodeURIComponent(screenKey) : "";
+  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?role=robot${q ? "&" + q : ""}${sk}`;
   const ICE = { iceServers: [] };              // LAN / Tailscale: host candidates are enough
 
   const peers = new Map();                     // pilot id -> { pc, audio }
@@ -141,7 +144,8 @@
     if (navCam) {
       try {
         nav = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: navCam.deviceId }, width: 320, height: 240, frameRate: 15 },
+          // 640x480 like the head: at 320x240 its fisheye leaves the floor a metre ahead too small to read.
+          video: { deviceId: { exact: navCam.deviceId }, width: 640, height: 480, frameRate: 15 },
         });
       } catch (e) { console.warn("nav camera unavailable", e); }
     }
@@ -450,7 +454,7 @@
     if (!ws || ws.readyState !== 1) return;
     if (ws.bufferedAmount > 256 * 1024) return;   // slow link: skip frames instead of queueing them
     if (media && media.nav && navVideo.srcObject !== media.nav) navVideo.srcObject = media.nav;
-    for (const [cam, v, maxW] of [["head", $("self"), 640], ["nav", navVideo, 320]]) {
+    for (const [cam, v, maxW] of [["head", $("self"), 640], ["nav", navVideo, 640]]) {
       if (!v.videoWidth) continue;
       const scale = Math.min(1, maxW / v.videoWidth);
       grab.width = Math.round(v.videoWidth * scale); grab.height = Math.round(v.videoHeight * scale);

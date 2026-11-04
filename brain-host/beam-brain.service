@@ -2,7 +2,10 @@
 # Install: see brain-host/install.sh. Settings live in /etc/beam-brain.env:
 #   BEAM_BRAIN_URL=wss://beam-lab.<tailnet>.ts.net/ws    (the robot; ws://127.0.0.1:8080/ws for the dev setup)
 #   BEAM_BRAIN_KEY=<same as BRAIN_KEY in the robot's beam.conf>
-#   BEAM_BRAIN_ARGS=                                      (optional, e.g. --token <ACCESS_TOKEN>)
+#   BEAM_TOKEN=<ACCESS_TOKEN>                             (only if the robot uses one)
+#   BEAM_BRAIN_ARGS=                                      (optional, e.g. --home-url ...)
+# The key and token reach the brain through the environment, never the command line: any program on this
+# machine can read a command line, but only root can read this file.
 [Unit]
 Description=Beam+ brain (face recognition, greetings)
 After=network-online.target tailscaled.service
@@ -12,7 +15,7 @@ Wants=network-online.target
 User=__USER__
 EnvironmentFile=/etc/beam-brain.env
 WorkingDirectory=__PROJECT__
-ExecStart=__PYTHON__ -m beambrain --url ${BEAM_BRAIN_URL} --key ${BEAM_BRAIN_KEY} \
+ExecStart=__PYTHON__ -m beambrain --url ${BEAM_BRAIN_URL} \
   --models __HOME__/beam-brain/models --data __HOME__/beam-brain/data $BEAM_BRAIN_ARGS
 Restart=always
 RestartSec=5

@@ -63,6 +63,10 @@ When **nobody is driving**, say **"hey Rocky"** and talk normally; he answers ou
 each exchange you don't need his name. "Hey Rocky" alone gets a "Question?" (after a short wait, in case
 you go on).
 
+- **Say it first:** "hey Rocky" (or "hi" / "okay Rocky", after an "um" or "oh" if you like) wakes him only at
+  the start of what you say, or of a sentence. "We had a rocky start" or "hi Ricky" in the middle of room
+  talk doesn't; "Rocky?" on its own does.
+
 - **When he listens:** only while the robot is awake, the brain is connected, and **no driver is connected**
   (a driver's conversation is theirs; drivers type to him instead). The server enforces it: the moment a
   driver connects, the microphone stops going to the brain. Asleep, nothing is captured at all.
@@ -153,6 +157,20 @@ Setup:
 3. On the brain host, put the token in `~/beam-brain/ha.key` (`chmod 600`).
 4. Add to `BEAM_BRAIN_ARGS` in `/etc/beam-brain.env`, then restart `beam-brain`:
    `--home-url http://<home-assistant>:8123/api/mcp --home-drivers <your Tailscale login>[,<another>]`
+
+## Going places
+
+With named places on the floor map (docs/ai-driving.md), he can be sent to them: "hey Rocky, go to the kitchen",
+"go watch TV", "go to your charger". The same people who may switch things may send him (anyone in the room, and
+the `--home-drivers`); for anyone else he says the driver does the moving.
+
+- **Not sure, he asks.** If he isn't sure what he heard or which place is meant, he asks first ("Question: kitchen?")
+  and goes when you say yes. Anything that makes no sense, he asks you to say again rather than guessing.
+- **Hearing the names.** Speech recognition is told the place names, so it expects them (it helps with accents).
+- **Stop.** While he drives himself nobody is at the controls, so saying **"stop"** in the room stops him at once,
+  no name needed. So does any key or STOP on a driving page.
+- He's labelled as the AI on every screen while he drives, and says when he's there (or that he couldn't get there).
+  Listening is off while a driving page is open, so to talk to him, close the driving page.
 
 ## How it works
 

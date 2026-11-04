@@ -22,10 +22,12 @@ whose cloud service is gone.
 
 Tested on a real Beam+ (October 2026), running from a USB stick, with the robot's own disk untouched:
 
-- **Driving** from a browser on your laptop or phone: keyboard, on-screen joystick or gamepad, with
-  a dead-man stop, E-STOP, and speed limits
+- **Driving** from a browser on your laptop or phone: keyboard, on-screen joystick or a standard gamepad
+  (left stick forward and back, right stick to turn, B for E-STOP), with a dead-man stop, E-STOP, and
+  speed limits
 - **Live video** from the head and floor cameras, and **two-way audio**: hear the room through the
-  robot's microphone, and talk through its speaker
+  robot's microphone, and talk through its speaker. The robot's screen shows who is connected (names from
+  Tailscale) and plays your voice when you Talk, but not your video
 - **Charging** on the original dock, and **remote access** from anywhere through Tailscale, with
   nothing exposed to the internet
 - **Sleep mode**, by button or on a nightly schedule: cameras, microphone and screen off, and woken
@@ -100,12 +102,13 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 | Lidar (Surroundings view), ultrasonic distance sensor, obstacle stop | optional, tested on a Beam+ | Slamtec RPLIDAR C1; DFRobot A02YYUW with a CP2102 USB serial adapter; a powered USB hub in the base | plug them in, see [docs/sensors.md](docs/sensors.md) |
 | Face recognition and spoken greetings | **experimental**, tried on a Beam+ | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
 | Rocky: animated face, typed chat from drivers, "hey Rocky" or a wave in the room (only while nobody drives), sight when asked, Home Assistant control, editable personality | **experimental**, tried on a Beam+ | the brain, an AI provider API key; optional Fish Audio key for his voice, optional Home Assistant | see [docs/rocky.md](docs/rocky.md) |
+| Floor map from the lidar, docking from anywhere, named places ("hey Rocky, go to the kitchen") | **experimental**, tried on a Beam+ | the brain, the lidar, the phone panel (its rear camera docks), the printed dock marker sheet | see [docs/ai-driving.md](docs/ai-driving.md) |
 | AI driving | **experimental**, simulator only so far | the brain, plus an AI provider API key | see [docs/ai-driving.md](docs/ai-driving.md) |
 
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.5` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.6` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one
@@ -184,7 +187,9 @@ account (phone app, laptop). The serve setting persists across reboots, and `sud
 
 ## Run it against the simulator
 
-Needs Python 3.10+ and `aiohttp` (`sudo apt install python3-aiohttp`; for tests also `python3-pytest python3-pytest-asyncio`).
+Needs Python 3.10+, `aiohttp`, NumPy and OpenCV (`sudo apt install python3-aiohttp python3-numpy python3-opencv`;
+for tests also `python3-pytest python3-pytest-asyncio`). The simulator's virtual house needs NumPy to start, and
+OpenCV for its camera pictures.
 
 ```bash
 scripts/dev-run.sh          # starts the simulator + server on :8080
@@ -194,10 +199,11 @@ scripts/dev-run.sh stop
 Open `http://<host>:8080/` and drive. For video without the robot, open
 `http://<host>:8080/robot?test=1` in another tab: it streams moving test patterns and a beep
 in place of the cameras. Logs are in `/tmp/beam-sim.log` and `/tmp/beam-server.log`.
-Simulator options (`python3 -m beamctl.sim --help`) can inject corrupted or dropped replies.
+Simulator options (`python3 -m beamctl.sim --help`) can inject corrupted or dropped replies. Its battery and
+charger readings are made up for illustration, not measured on a Beam+.
 
 ```bash
-python3 -m pytest -q        # 116 tests, about a minute and a half
+python3 -m pytest -q        # the whole test suite takes several minutes
 ```
 
 ## Safety behaviour
@@ -209,8 +215,14 @@ python3 -m pytest -q        # 116 tests, about a minute and a half
 - **Obstacle stop** (with a lidar or the ultrasonic sensor): forward driving slows from 0.8 m and stops 0.25–0.3 m before an obstacle; backing up and turning stay free. A driver can switch it off for themselves only. See [docs/sensors.md](docs/sensors.md).
 - **One driver at a time:** a second page gets "another driver has control" while the first is active.
 - **Board link loss:** after 2 s of silence the server reopens the port and restarts from speed 0.
-- **Power watchdog:** on opening the port the server immediately sends Beam's "power-cycle in 300 s" order and re-sends it every 5 s. Without this, the robot powers off about 5 minutes after you boot your own OS (see the spec, section 6).
-- **No authentication by default.** Use `--token SECRET` and open `http://robot:8080/?token=SECRET` for anything beyond your home LAN.
+- **Power watchdog:** on opening the port the server immediately sends Beam's "power-cycle in 300 s" order and re-sends it every 5 s. Without this, the robot powers off within about 5 minutes of booting your own OS: the count runs from the last refresh the board received, so after a restart it can come sooner (see the spec, section 6).
+- **No login of its own.** On the USB image, every user and device on your tailnet can watch and drive,
+  including people you've shared the robot with; with `LAN_ACCESS=yes`, so can anyone on your home network
+  (over plain http) unless `ACCESS_TOKEN` is set. Limit who reaches it with Tailscale's access controls
+  (ACLs or grants), and/or set `ACCESS_TOKEN` in `beam.conf` so pages also need `?token=...` in the URL. A bare
+  `beamctl.server` has no authentication at all: set `BEAM_TOKEN=SECRET` in its environment (better than `--token`,
+  which any program on the machine can read) and open `http://robot:8080/?token=SECRET`
+  for anything beyond your home LAN.
 
 ## Things that may surprise you on the real robot
 
@@ -218,8 +230,9 @@ python3 -m pytest -q        # 116 tests, about a minute and a half
   board steers by its gyro, which can't work while the robot's body doesn't move. Judge only
   directions on blocks; on the floor it drives and stops cleanly.
 - **Turns start slowly.** The board ramps up turning speed: hold the key rather than tapping it.
-- **If the motor board isn't connected, the robot powers itself off about 5 minutes after boot.**
-  That's the board's own watchdog, which our server normally keeps refreshing. Check the small USB
+- **If the motor board isn't connected, the robot powers itself off within about 5 minutes of booting.**
+  That's the board's own watchdog, which our server normally keeps refreshing. It counts from the last
+  refresh, so after a restart the cut can come sooner. Check the small USB
   cable on the motor board in the base: lifting the robot's top can pull it loose.
 - **Cameras appear a few seconds after the screen.** They need their firmware loaded at every
   power-on; the stick copies it from the robot's own disk the first time.
@@ -246,7 +259,7 @@ its own licence:
 
 - Python packages: aiohttp, NumPy, OpenCV, pytest (installed from your distribution or PyPI)
 - Face models **YuNet** and **SFace** from the [OpenCV model zoo](https://github.com/opencv/opencv_zoo),
-  downloaded by `brain-host/install.sh`
+  downloaded by `brain-host/install.sh`, pinned to a fixed revision and SHA-256 checked
 - Speech recognition on the brain host: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT)
   with the Whisper `base.en` model (MIT), [Silero VAD](https://github.com/snakers4/silero-vad) (MIT) and
   [Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2 (BSD-2-Clause); the models download once, pinned
@@ -254,7 +267,7 @@ its own licence:
 - Optional voice for Rocky: [Fish Audio](https://fish.audio) (a paid cloud service; bring your own key). The
   default voice is a community-made fan clone of the character, for personal use
 - Text to speech: [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0) and its
-  `en_US-lessac-medium` voice (see that voice's model card on Hugging Face), or `espeak-ng` as a fallback.
+  `en_US-lessac-medium` voice (see that voice's model card on Hugging Face), pinned and checked the same way, or `espeak-ng` as a fallback.
   They run as a separate, optional dependency of the brain.
 - Robot USB image: Debian 13, Chromium, cage, PipeWire, Tailscale and the other Debian packages listed in
   `image/packages.txt`, fetched from their official repositories when you build the image

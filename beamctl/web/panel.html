@@ -91,11 +91,15 @@
   const params = new URLSearchParams(location.search);
   const token = params.get("token");
   const q = token ? "&token=" + encodeURIComponent(token) : "";
-  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?role=panel${q}`;
+  // This boot's screen key (beam-setup adds it to the URL it opens): other apps on the phone don't know it.
+  const screenKey = params.get("screen_key");
+  const sk = screenKey ? "&screen_key=" + encodeURIComponent(screenKey) : "";
+  const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?role=panel${q}${sk}`;
   const ICE = { iceServers: [] };
 
   let ws = null, last = null, asleep = false, camera = null, noteTimer = null;
   const peers = new Map();                          // pilot id -> RTCPeerConnection (rear camera out)
+  const hellos = new Map();                         // pilot id -> how many hellos (only the latest gets an answer)
 
   // Full screen needs a tap the first time (browsers don't allow it otherwise).
   $("start").addEventListener("click", () => {
@@ -135,15 +139,23 @@
   $("wakeBtn").addEventListener("click", () => { send({ type: "wake" }); $("wakeBtn").textContent = "Waking up…"; });
 
   // ---------- rear camera (back camera of the phone) ----------
-  async function openCamera() {
-    if (camera || asleep) return camera;
-    camera = await navigator.mediaDevices.getUserMedia({
+  // One request at a time: the robot says hello again every 10 s, and a second request while the first waits
+  // (e.g. for the "Allow camera" tap) would leave one camera open that nothing uses. null while asleep.
+  let opening = null;
+  function openCamera() {
+    if (camera || asleep) return Promise.resolve(camera);
+    opening = opening || navigator.mediaDevices.getUserMedia({
       // Small and slow on purpose: the robot re-encodes it for every driver, next to its own two cameras.
       video: { facingMode: { ideal: "environment" }, width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 10, max: 10 } },
       audio: false,
-    });
-    reportLight();
-    return camera;
+    }).then((stream) => {
+      opening = null;
+      if (asleep) { stream.getTracks().forEach((t) => t.stop()); return null; }   // fell asleep meanwhile
+      camera = stream;
+      reportLight();
+      return camera;
+    }, (e) => { opening = null; throw e; });
+    return opening;
   }
   function closeCamera() {
     if (camera) camera.getTracks().forEach((t) => t.stop());
@@ -165,20 +177,69 @@
   }
   function reportLight() {
     send({ type: "light", on: light, available: lightAvailable() });
-    $("rear").textContent = !camera ? "rear camera off" : light ? "rear camera on · light on" : "rear camera on";
+    $("rear").textContent = (!camera ? "rear camera off" : light ? "rear camera on · light on" : "rear camera on") + (feed ? " · 🤖 AI docking" : "");
   }
   function closePeer(id) {
     const pc = peers.get(id);
     if (pc) { peers.delete(id); pc.close(); }
-    if (!peers.size) closeCamera();            // nobody watching: the camera is closed, not just unused
+    if (!peers.size && !feed) closeCamera();   // nobody watching: the camera is closed, not just unused
+  }
+
+  // ---------- rear camera to the brain: only while the AI backs onto the charger (it asks, the server relays) ----------
+  let feed = false, feedTimer = null;
+  const feedVideo = Object.assign(document.createElement("video"), { muted: true, playsInline: true, autoplay: true });
+  const feedGrab = document.createElement("canvas");
+  async function setFeed(on) {
+    on = !!on && !asleep;
+    if (on === feed) return;
+    feed = on;
+    clearInterval(feedTimer); feedTimer = null;
+    if (on) {
+      try { await openCamera(); }
+      catch (e) { feed = false; note("Rear camera unavailable: " + e.message, 8000); return; }
+      if (!feed || !camera) {                   // switched off (or asleep) while the camera was opening
+        feed = false;
+        if (!peers.size) closeCamera();
+        return;
+      }
+      // Sharper while docking: the markers behind the charger are small from a metre away.
+      try { await cameraTrack().applyConstraints({ width: { ideal: 640 }, height: { ideal: 480 } }); } catch (e) { /* keeps its size */ }
+      if (!feed || !camera) return;             // switched off meanwhile: that call tidied up
+      feedVideo.srcObject = camera;
+      clearInterval(feedTimer);                 // right before setting it: a quick off-on can't leave two
+      feedTimer = setInterval(sendRearFrame, 200);
+    } else {
+      feedVideo.srcObject = null;
+      if (!peers.size) closeCamera();
+      else { try { await cameraTrack().applyConstraints({ width: { ideal: 320 }, height: { ideal: 240 } }); } catch (e) { /* fine */ } }
+    }
+    reportLight();
+    if (last) render(last);
+  }
+  function sendRearFrame() {
+    const v = feedVideo;
+    if (!feed || !v.videoWidth || !ws || ws.readyState !== 1 || ws.bufferedAmount > 256 * 1024) return;
+    feedGrab.width = v.videoWidth; feedGrab.height = v.videoHeight;
+    feedGrab.getContext("2d").drawImage(v, 0, 0);
+    const jpeg = feedGrab.toDataURL("image/jpeg", 0.8).split(",")[1];
+    // "type" first: the server spots frames by their prefix.
+    ws.send(JSON.stringify({ type: "frame", cam: "rear", w: feedGrab.width, h: feedGrab.height, jpeg }));
   }
   async function onRtc(from, data) {
     if (data.kind === "hello") {
       if (asleep) return;
       closePeer(from);
+      const n = (hellos.get(from) || 0) + 1;
+      hellos.set(from, n);
       let stream;
-      try { stream = await openCamera(); }
-      catch (e) { note("Rear camera unavailable: " + e.message, 8000); return; }
+      try {
+        stream = await openCamera();
+        // Closed again while it was opening (e.g. the AI's rear feed went off): open a fresh one.
+        if (stream && stream !== camera) stream = await openCamera();
+      } catch (e) { note("Rear camera unavailable: " + e.message, 8000); return; }
+      if (!stream || asleep || hellos.get(from) !== n) return;   // asleep, or a newer hello answers instead
+      const old = peers.get(from);
+      if (old) old.close();                      // never two at once: a replaced one would keep the camera busy
       const pc = new RTCPeerConnection(ICE);
       peers.set(from, pc);
       for (const t of stream.getVideoTracks()) pc.addTrack(t, stream);
@@ -200,7 +261,7 @@
   function render(s) {
     last = s;
     const sleeping = !!(s.sleep && s.sleep.asleep);
-    if (sleeping && !asleep) { asleep = true; for (const id of [...peers.keys()]) closePeer(id); closeCamera(); }
+    if (sleeping && !asleep) { asleep = true; setFeed(false); for (const id of [...peers.keys()]) closePeer(id); closeCamera(); }
     if (!sleeping && asleep) { asleep = false; $("wakeBtn").textContent = "☀️ Wake up"; }
     document.body.classList.toggle("asleep", sleeping);
 
@@ -211,9 +272,16 @@
     document.body.classList.toggle("live", n > 0);
     $("sub").textContent = n ? `${who} ${n > 1 ? "are" : "is"} connected` : "Nobody is connected";
     $("sub").classList.remove("offline");
+    // Everyone who gets the camera or microphone, not just people: the brain gets the head camera while it's
+    // connected (face recognition), and the microphone while Rocky listens.
+    const seen = [];
+    if (n) seen.push(`📷 Camera on · ${who} can see and hear you`);
+    if (M.brain_online && M.robot_online && !sleeping) seen.push("🤖 The AI sees the camera (face recognition)");
+    if (M.listening) seen.push("👂 Rocky (AI) is listening");
+    if (feed) seen.push("🤖 The AI is using the rear camera to back onto the charger");
     const p = $("privacy");
-    p.className = "privacy" + (n ? " watching" : "");
-    p.textContent = n ? `📷 Camera on · ${who} can see and hear you` : "📷 Nobody is watching";
+    p.className = "privacy" + (seen.length ? " watching" : "");
+    p.textContent = seen.length ? seen.join(" · ") : "📷 Nobody is watching";
     $("battery").textContent = B.battery_percent != null ? `battery ${B.battery_percent.toFixed(0)}%${B.charging ? " · charging" : ""}` : "battery —";
   }
 
@@ -226,8 +294,10 @@
       else if (m.type === "light") setLight(m.on);
       else if (m.type === "volumes") showVolumes(m);
       else if (m.type === "ears_status") showEars(m);
+      else if (m.type === "rear_feed") setFeed(m.on);
     };
     ws.onclose = (ev) => {
+      setFeed(false);
       for (const id of [...peers.keys()]) closePeer(id);
       $("sub").textContent = "Robot not reachable"; $("sub").classList.add("offline");
       if (ev.code !== 4000) setTimeout(connect, 1500);      // 4000: another panel took over

@@ -6,7 +6,7 @@ Reverse-engineered from Beam software 2.22.14 (live-disk build, Sep 2021):
 - `librpd_shared.so`: `DrivingListener::st001Thread()` (the drive loop) and its settings defaults
 - `st001_power_control`: the power/watchdog helper
 
-Decompiled with Ghidra 12.1.4 through REA on the analysis VM (`~/beam/re/`).
+Decompiled with Ghidra 12.1.4 (the decompiled sources aren't in this repository: they're Beam's code).
 Each item is marked **[confirmed]** (read straight from the code), **[tested]** (seen on a real Beam+, Oct 2026)
 or **[hypothesis]** (still to verify). Section 8 has what the real robot taught us.
 
@@ -78,7 +78,7 @@ def crc(buf: bytes) -> int:          # len(buf) % 4 == 0
 | `0x14` | get dock id | 0 | 0 | 0 | 64-byte reply **[confirmed]** |
 | `0x19` | charging LED colour | 0 | colour & 0xFFFF | 0 | the light at the bottom of the Beam+. 0 = off, `0x0F00` = the green it shows while charging, `0xFFFF` = light blue, 1–4 = blue. **Not** RGB565 (`0x07E0` is light blue) **[tested]** |
 
-The library also sends battery calibration, RAM reads and serial-number commands. We don't need them, and their codes are in the decompiled sources on the VM.
+The library also sends battery calibration, RAM reads and serial-number commands. We don't need them, and their codes are in the decompiled library (not included here).
 
 ## 4. Status packet (`0xCCCC3333`, 128 bytes) **[confirmed]**
 
@@ -141,7 +141,8 @@ Each cycle:
 
 Beam keeps sending **power-cycle in 300 s** (code `0x0F`, a = 300, b = 0) every 5 s. Both the app and `st001_power_control W /dev/st001 300 5` in the startup script do this. Each command replaces the previous one, so as long as Beam's software runs, the reboot never fires. If the PC hangs, the base power-cycles it 5 minutes later.
 
-**What this means for us:** when we boot our own Linux on the robot, the old software's last refresh is still pending, so **the base will cut power about 5 minutes later** unless our software keeps refreshing it. Our motor server must send `0x0F, a = 300, b = 0` every 5 s, starting immediately. Sending `power-off` (b = 2) with a short delay is also the clean way to shut the robot down.
+**What this means for us:** when we boot our own Linux on the robot, the old software's last refresh is still pending, so **the base will cut power within about 5 minutes** unless our software keeps refreshing it. **[hypothesis]** The 300 s count runs from the **last refresh the board received**, not from the boot, so the time the PC took to shut down and start again is already used up. Once the cut came about 2 minutes after a cold start (`docs/sensors.md`), which this doesn't explain (a timer from a refresh before a long power-off would have run out); a timer armed at power-on would. Our motor server must send `0x0F, a = 300, b = 0` every 5 s, starting immediately. Sending `power-off` (b = 2) with a short delay is also the clean way to shut the robot down: the motor
+server does that when Linux powers off (`docs/robot-usb.md`, "Shutting down").
 
 ## 7. Open questions
 

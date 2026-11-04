@@ -1,0 +1,62 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612.00 792.00] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 1226 >>
+stream
+0 g
+50.882 621.921 85.039 85.039 re f
+135.921 621.921 85.039 85.039 re f
+220.961 621.921 85.039 85.039 re f
+306.000 621.921 85.039 85.039 re f
+391.039 621.921 85.039 85.039 re f
+476.079 621.921 85.039 85.039 re f
+50.882 536.882 85.039 85.039 re f
+476.079 536.882 85.039 85.039 re f
+50.882 451.843 85.039 85.039 re f
+220.961 451.843 85.039 85.039 re f
+306.000 451.843 85.039 85.039 re f
+476.079 451.843 85.039 85.039 re f
+50.882 366.803 85.039 85.039 re f
+220.961 366.803 85.039 85.039 re f
+306.000 366.803 85.039 85.039 re f
+476.079 366.803 85.039 85.039 re f
+50.882 281.764 85.039 85.039 re f
+135.921 281.764 85.039 85.039 re f
+220.961 281.764 85.039 85.039 re f
+306.000 281.764 85.039 85.039 re f
+476.079 281.764 85.039 85.039 re f
+50.882 196.724 85.039 85.039 re f
+135.921 196.724 85.039 85.039 re f
+220.961 196.724 85.039 85.039 re f
+306.000 196.724 85.039 85.039 re f
+391.039 196.724 85.039 85.039 re f
+476.079 196.724 85.039 85.039 re f
+BT /F1 11 Tf 79.37 145.70 Td (Beam head camera calibration (US Letter). Print at 100 % (actual size).) Tj ET
+BT /F1 11 Tf 79.37 125.86 Td (Check: the black square is 180 mm.) Tj ET
+BT /F1 11 Tf 79.37 106.02 Td (Stand it UPRIGHT facing the robot, this bottom edge on the floor.) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000247 00000 n 
+0000001525 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1595
+%%EOF

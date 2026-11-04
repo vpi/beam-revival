@@ -4,6 +4,9 @@ Description=Beam+ motor server
 # refreshed its watchdog, and this server is what refreshes it now.
 After=beam-config.service
 Wants=beam-config.service
+# Stopped before D-Bus at shutdown: it asks systemd (over D-Bus) whether this is a poweroff, and if so tells
+# the base to switch off instead of leaving its power-cycle armed.
+After=dbus.service
 
 [Service]
 User=beamsrv

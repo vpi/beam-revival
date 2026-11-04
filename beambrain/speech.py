@@ -46,7 +46,8 @@ class Speaker:
                 self.voice.synthesize_wav(text, w)
             return buf.getvalue()
         if shutil.which("espeak-ng"):
-            return subprocess.run(["espeak-ng", "--stdout", text], capture_output=True, check=True).stdout
+            # "--": text starting with "-" (an AI reply, a typed name) is words to say, never options.
+            return subprocess.run(["espeak-ng", "--stdout", "--", text], capture_output=True, check=True).stdout
         return None
 
 

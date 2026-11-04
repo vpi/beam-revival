@@ -43,13 +43,34 @@ def test_wake_word():
     w.sleep()
     assert w.heard("Hirocky, what time is it?", now=300) == ("chat", "what time is it?")    # run together
     w.sleep()
-    assert w.heard("Hey Rocco.", now=400) == ("wake", "")
+    assert w.heard("Um, hi Rocky, what's for dinner?", now=400) == ("chat", "what's for dinner?")   # filler first
+    w.sleep()
+    assert w.heard("Okay, hey Rocky.", now=410) == ("wake", "")
+    w.sleep()
+    assert w.heard("I'm back. Hey Rocky, did you miss me?", now=420) == ("chat", "did you miss me?")
     w.sleep()
     assert w.heard("Rocky?", now=500) == ("wake", "")                        # his name on its own calls him
     w.sleep()
     assert w.heard("Ask Rocky later.", now=600) == ("ignore", "") and Wake.has_name("Ask Rocky later.")
     assert w.heard("A rock in my shoe.", now=601) == ("ignore", "")
     assert not w.awake
+
+
+def test_everyday_speech_doesnt_wake_him():
+    """Said in the room, not to him: none of this may go to the AI."""
+    w = Wake(awake_s=60)
+    for said in ["We had a rocky start this year.",
+                 "I watched a rocket launch on TV, it was huge.",
+                 "Oh, rocking chairs are comfy.",
+                 "Hi Ricky, how was school?",
+                 "Hey Roxy, come here girl.",
+                 "Hey Rocco.",
+                 "I told him hey Rocky is a robot.",                         # the phrase, but not said first
+                 "Oh Rocky, that's a nice name.",
+                 "Okay. Rocking chair there.",                               # greeting and name in different sentences
+                 "Hiroki, come here."]:                                      # someone's name, not his run together
+        assert w.heard(said, now=0) == ("ignore", ""), said
+        assert not w.awake
 
 
 class FakeVAD:

@@ -219,7 +219,8 @@ class Status:
             "command_latency_ms": self.command_latency_ms,
             "limiter_latency_ms": self.limiter_latency_ms,
             "yaw_deg": round(math.degrees(self.yaw_rad), 1),
-            # Distance driven since the board started, from the wheel encoders (Beam's own formula).
+            # Net distance since the board started, from the wheel encoders (Beam's own formula): forward
+            # minus backward, so 1 m out and 1 m back reads 0. Not the total distance driven.
             "odometry_m": round((self.encoder_l - self.encoder_r) * ENCODER_LINEAR_SCALE, 3),
             "temperature": self.temperature,
             "timestamp_us": self.timestamp_us,

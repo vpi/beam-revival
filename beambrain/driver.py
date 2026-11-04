@@ -53,6 +53,17 @@ How to drive well:
 - When you are close to the target (about 1 m, roughly facing it), call done.
 - If the task really can't be done, call give_up with the reason."""
 
+# The real Beam+ (a measured CameraModel) has different cameras from the simulator's.
+SIM_CAMERAS = SYSTEM[SYSTEM.index("- HEAD camera"):SYSTEM.index("Each step")]
+REAL_CAMERAS = """- HEAD camera: forward-facing at head height, a wide 98 degrees with slightly curved edges. It sees far,
+  but things on the floor closer than about 1.3 m drop out of the bottom of this view.
+- FLOOR camera: a fisheye looking down and forward from head height. The robot's own mast and a phone
+  fill the lower middle; the floor ahead runs up the picture to about 1.2 m away, and about 1 m wide.
+  Use it for the last metre: anything close to you on the floor shows up here.
+"""
+FLOOR_HINT = {False: "this image looks straight down at the floor",
+              True: "this image looks down at the floor ahead; the robot's own mast and phone are in the lower middle"}
+
 BIG_ACTIONS_HELP = """
 You also have two big actions that do the aiming and distance-judging for you. Prefer them:
 - approach(target): drives up to a thing you can see, e.g. approach("the red ball"), and stops about
@@ -163,6 +174,32 @@ def _wrap(deg: float) -> float:
     return (deg + 180) % 360 - 180
 
 
+class WheelProgress:
+    """Whether the robot is really getting anywhere, by its wheels' odometry (and, if `turns`, the gyro). The
+    board's own actual_linear/actual_angular may not match the wheels on a Beam+ (docs/motor-protocol.md, open
+    questions), so a stall counts if either they or this say so."""
+    STEP_M, STEP_DEG = 0.01, 2.0    # less than this since the last progress: not moving
+    STILL_S = 0.3                   # ...for this long: stopped (at the slowest drive, 3.6 cm of wheel travel)
+
+    def __init__(self, board: dict, now: float, turns: bool = False):
+        self.turns = turns
+        self.odo, self.yaw, self.at = board.get("odometry_m"), board.get("yaw_deg"), now
+
+    def stopped(self, board: dict, now: float) -> bool:
+        """True when the wheels have made no progress for STILL_S. Without odometry, False: only the board's
+        speeds can tell then."""
+        odo, yaw = board.get("odometry_m"), board.get("yaw_deg")
+        if odo is None or self.odo is None:
+            self.odo, self.yaw, self.at = odo, yaw, now
+            return False
+        moved = abs(odo - self.odo) >= self.STEP_M
+        if self.turns and yaw is not None and self.yaw is not None:
+            moved = moved or abs(_wrap(yaw - self.yaw)) >= self.STEP_DEG
+        if moved:
+            self.odo, self.yaw, self.at = odo, yaw, now
+        return now - self.at > self.STILL_S
+
+
 class AIDriver:
     # Generous token budget: thinking models deliberate before answering, and the deliberation counts.
     # Too small and they're cut off before choosing anything (finish_reason "length").
@@ -249,7 +286,7 @@ class AIDriver:
             self._check()
             if use_floor:
                 nav = await self._look("nav")
-                found, box = await self._locate(nav, f"{target} (this image looks straight down at the floor)") if nav else (False, None)
+                found, box = await self._locate(nav, f"{target} ({FLOOR_HINT[self.cam.head is not None]})") if nav else (False, None)
                 if found:
                     angle, edge = target_from_floor(box, self.cam)
                     if abs(angle) > 8:
@@ -299,7 +336,7 @@ class AIDriver:
             return None
         found, box = await self._locate(
             nav, "the gap in the wall: the place where the floor continues between the dark wall areas "
-                 "(this image looks straight down at the floor; the dark areas are walls)")
+                 f"({FLOOR_HINT[self.cam.head is not None]}; the dark areas are walls)")
         if not found:
             return None
         angle, near = target_from_floor(box, self.cam)
@@ -360,6 +397,7 @@ class AIDriver:
         start = self._board().get("odometry_m", 0.0)
         t0 = time.monotonic()
         stalled_since = None
+        progress = WheelProgress(self._board(), t0)
         while True:
             self._check()
             b = self._board()
@@ -369,7 +407,8 @@ class AIDriver:
                 break
             now = time.monotonic()
             # Blocked: commanding motion but the wheels aren't turning (sim: bumped into something).
-            if now - t0 > 0.8 and abs(b.get("actual_linear", 0.0)) < 0.02:
+            stopped = progress.stopped(b, now)
+            if now - t0 > 0.8 and (stopped or abs(b.get("actual_linear", 0.0)) < 0.02):
                 stalled_since = stalled_since or now
                 if now - stalled_since > 0.5:
                     await self._settle()
@@ -422,7 +461,8 @@ class AIDriver:
         if self.guides and self.crumbs is not None:
             content += [{"type": "text", "text": "MAP of your path so far:"},
                         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + _b64(self.crumbs.render())}}]
-        system = SYSTEM + (GUIDES_HELP if self.guides else "") + (BIG_ACTIONS_HELP if self.big_actions else "")
+        system = SYSTEM.replace(SIM_CAMERAS, REAL_CAMERAS) if self.cam.head is not None else SYSTEM
+        system += (GUIDES_HELP if self.guides else "") + (BIG_ACTIONS_HELP if self.big_actions else "")
         return [{"role": "system", "content": system}, {"role": "user", "content": content}]
 
     async def run(self, session: aiohttp.ClientSession | None = None) -> Outcome:
@@ -437,7 +477,7 @@ class AIDriver:
         tools = TOOLS if self.allow_say else [t for t in TOOLS if t["function"]["name"] != "say"]
         if self.big_actions:
             tools = tools + BIG_TOOLS
-        log.info("AI task (%s): %s", self.llm.model, self.task)
+        log.info("AI task (%s): %d characters", self.llm.model, len(self.task))   # never the task's words
         await self._label(True, step=0, max_steps=self.max_steps, action="starting")
         # Breadcrumbs: dead reckoning from the robot's own telemetry, updated 10x a second.
         self.crumbs = Breadcrumbs()
@@ -530,7 +570,11 @@ class AIDriver:
                     result = f"unknown tool {name!r}"
                 last_move_end = time.monotonic()
                 history.append(Step(n, name, args, result, r.seconds, last_move_end - t_move, finish, recovered))
-                log.info("step %d: %s(%s) -> %s", n, name, json.dumps(args)[:120], result)
+                # Numbers only (degrees, metres): "say" holds words spoken in the room, and "why", a target or
+                # what an approach found may name people.
+                log.info("step %d: %s(%s) -> %s", n, name,
+                         json.dumps({k: v for k, v in args.items() if isinstance(v, (int, float))}),
+                         result if name in ("turn", "drive") else f"{len(result)} characters")
             else:
                 out.outcome, out.summary = "out_of_steps", f"used all {self.max_steps} steps"
         except Aborted as e:
@@ -552,7 +596,7 @@ class AIDriver:
             await self._label(False, outcome=out.outcome, summary=out.summary, steps=len(history))
             if own_session:
                 await session.close()
-        log.info("AI task finished: %s (%s) in %d steps, %.0f s", out.outcome, out.summary, len(history), out.seconds)
+        log.info("AI task finished: %s in %d steps, %.0f s", out.outcome, len(history), out.seconds)   # not its summary: words
         return out
 
     async def say(self, text: str) -> None:

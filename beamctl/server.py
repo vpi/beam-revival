@@ -25,6 +25,7 @@ import math
 import os
 import secrets
 import struct
+import subprocess
 import time
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -47,6 +48,20 @@ except OSError:
     VERSION = "development"
 
 
+def system_powering_off() -> bool:
+    """True while systemd is powering the computer off or halting it (not rebooting, not just stopping us)."""
+    try:
+        r = subprocess.run(["systemctl", "list-jobs", "--no-legend", "--plain"],
+                           capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in r.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] in ("poweroff.target", "halt.target") and fields[2] == "start":
+            return True
+    return False
+
+
 @dataclass
 class Config:
     device: str = "/dev/ttyACM0"
@@ -54,6 +69,13 @@ class Config:
     reply_timeout_s: float = 0.100             # Beam: 100 ms per velocity command
     watchdog_refresh_s: float = 5.0            # Beam: config/st001/watchdog_refresh_interval
     watchdog_delay_s: int = 300                # Beam: config/st001/watchdog_delay
+    # On `poweroff` (not a reboot, not a server restart): tell the base to switch off this long after the
+    # server stops, time enough for Linux to finish shutting down. 0 = leave the power-cycle armed instead.
+    power_off_delay_s: int = 20
+    # Per-boot key the robot screen and the phone panel add to their URL (beam-setup makes it): only they may
+    # take the robot and panel roles, not just anything that reaches 127.0.0.1 (e.g. another app on the phone,
+    # which reaches it through adb reverse). None: being local is enough (development).
+    screen_key: str | None = None
     no_comm_reset_s: float = 2.0               # Beam: config/st001/no_comm_reset_timeout
     reopen_interval_s: float = 1.0
     deadman_s: float = 0.5                     # Beam used 5 s; much too long for a home
@@ -90,13 +112,14 @@ class Config:
     # Obstacle stop: forward driving slows down from `obstacle_slow_m` and stops at `obstacle_stop_m` (gaps in
     # front of the robot's front edge). The lidar counts what's in the robot's path: `robot_half_width_m` either
     # side of its centre line, measured from `lidar_to_front_m` behind the front edge. The ultrasonic sensor is
-    # at the front edge. With a sensor present but silent, forward is held to `obstacle_blind_speed`.
+    # at the front edge. With a sensor present but silent, or gone since it was seen (unplugged, a USB reset),
+    # forward is held to `obstacle_blind_speed`.
     obstacle_stop: bool = True
     obstacle_stop_m: float = 0.25
     obstacle_slow_m: float = 0.80
     obstacle_blind_speed: float = 0.10
     robot_half_width_m: float = 0.25
-    lidar_to_front_m: float = 0.20
+    lidar_to_front_m: float = 0.06       # measured on ours: its centre 6 cm behind the front edge
 
 
 OBSTACLE_MIN_SPEED = 0.02   # m/s: an obstacle-limited forward speed below this is a stop
@@ -109,10 +132,12 @@ PRIORITY_HUMAN = 1          # a person on a driving page always wins
 class DriveState:
     target_linear: float = 0.0
     target_angular: float = 0.0
-    last_input: float = 0.0
+    last_input: float = -math.inf               # never: the first minute after boot isn't "someone driving"
     owner: object | None = None
     owner_priority: int = PRIORITY_HUMAN
     estop: bool = False
+    estop_by: object | None = None              # the page that pressed STOP (None once it has left)
+    estop_driver: object | None = None          # whoever was driving when it was pressed
 
 
 @dataclass
@@ -178,6 +203,10 @@ class MotorController:
             self.drive.target_linear = self.drive.target_angular = 0.0
         if self.obstacle_off_for is owner:            # leaving turns the obstacle stop back on
             self.set_obstacle_stop(True, owner)
+        if self.drive.estop_by is owner:              # the E-stop stays, but anyone may release it now
+            self.drive.estop_by = None
+        if self.drive.estop_driver is owner:
+            self.drive.estop_driver = None
 
     def set_obstacle_stop(self, on: bool, owner: object) -> None:
         """A human driver may turn the obstacle stop off, for themselves only: it still holds for anyone else
@@ -196,24 +225,27 @@ class MotorController:
 
     def ahead(self) -> dict:
         """The gap in front of the robot: {"gap_m": metres or None (nothing seen), "by": "lidar"/"sensor",
-        "blind": a sensor is there but silent, "sensors": any at all, "max_forward": the speed it allows}."""
+        "blind": a sensor is there but silent, or lost, "lost": a sensor seen since start (or named) is gone,
+        "sensors": any at all, "max_forward": the speed it allows}."""
         rng, lid = self.range, self.lidar
         rs = rng.snapshot() if rng is not None else None
-        ls = lid.snapshot() if lid is not None else None
-        key = (rs and rs["fresh"] and rs["m"], ls and ls["fresh"] and lid.at)
+        lfresh = lid.fresh if lid is not None and lid.present else None     # None: no lidar
+        lost = any(s is not None and s.lost for s in (rng, lid))
+        key = (rs and rs["fresh"] and rs["m"], lfresh and lid.at, lost)
         if key == self._ahead[0]:
             return self._ahead[1]
         cfg, gaps = self.cfg, []
         if rs and rs["fresh"] and rs["m"] is not None:
             gaps.append((rs["m"], "sensor"))
-        if ls and ls["fresh"]:
+        if lfresh:
             for a, d in lid.points:
                 t = math.radians(a)
                 x, y = d * math.cos(t), d * math.sin(t)
                 if x > 0 and abs(y) <= cfg.robot_half_width_m:
                     gaps.append((x - cfg.lidar_to_front_m, "lidar"))
         gap, by = min(gaps) if gaps else (None, None)
-        blind = bool((rs and not rs["fresh"]) or (ls and not ls["fresh"]))
+        # A lost sensor counts as a silent one: what it saw (the low box, the glass) may still be there.
+        blind = bool((rs and not rs["fresh"]) or lfresh is False or lost)
         limit = cfg.max_linear
         if gap is not None:
             limit *= min(max((gap - cfg.obstacle_stop_m) / (cfg.obstacle_slow_m - cfg.obstacle_stop_m), 0.0), 1.0)
@@ -221,18 +253,35 @@ class MotorController:
                 limit = 0.0                              # don't creep the last centimetres: stop
         if blind:
             limit = min(limit, cfg.obstacle_blind_speed)
-        out = {"gap_m": None if gap is None else round(max(gap, 0.0), 2), "by": by, "blind": blind,
-               "sensors": rs is not None or ls is not None, "max_forward": round(limit, 3)}
+        out = {"gap_m": None if gap is None else round(max(gap, 0.0), 2), "by": by, "blind": blind, "lost": lost,
+               "sensors": rs is not None or lfresh is not None or lost, "max_forward": round(limit, 3)}
         self._ahead = (key, out)
         return out
 
-    def set_estop(self, on: bool) -> None:
-        self.drive.estop = on
+    def set_estop(self, on: bool, owner: object | None = None, who: str = "a driver") -> bool:
+        """Anyone may engage it. Only the page that pressed it, or the one driving when it was pressed, may release
+        it (anyone, once the pressing page has left), so a viewer can't undo someone else's stop: not even by
+        sending a stop first to become the driver. who: for the log (a pilot id, no names).
+        Returns False if the release was refused."""
+        d = self.drive
         if on:
-            self.drive.target_linear = self.drive.target_angular = 0.0
-            log.warning("E-STOP engaged")
-        else:
-            log.info("E-stop released")
+            if not d.estop:
+                d.estop, d.estop_by, d.estop_driver = True, owner, d.owner
+                log.warning("E-STOP engaged by %s", who)
+            d.target_linear = d.target_angular = 0.0
+            return True
+        if not d.estop:
+            return True
+        if not self.may_release_estop(owner):
+            log.warning("E-stop release by %s refused: not the page that pressed it, nor the driver then", who)
+            return False
+        d.estop, d.estop_by, d.estop_driver = False, None, None
+        log.info("E-stop released by %s", who)
+        return True
+
+    def may_release_estop(self, owner: object | None) -> bool:
+        d = self.drive
+        return d.estop_by is None or owner is d.estop_by or (owner is not None and owner is d.estop_driver)
 
     def go_to_sleep(self, reason: str) -> None:
         self.drive.owner = None
@@ -277,11 +326,15 @@ class MotorController:
 
     async def stop(self) -> None:
         self._stopping = True
+        if self._task:                     # first, so the loop can't slip a moving command between the zeros
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
         for sensor in (self.range, self.lidar):
             if sensor is not None:
                 await sensor.stop()
+        powering_off = self.cfg.power_off_delay_s > 0 and await asyncio.to_thread(system_powering_off)
         if self._port.is_open:
-            # Leave the board stopped. The pending power-cycle stays armed on purpose:
+            # Leave the board stopped. On a restart or reboot the pending power-cycle stays armed on purpose:
             # if nothing takes over, the robot reboots itself (Beam's own recovery behaviour).
             for _ in range(3):
                 try:
@@ -289,10 +342,24 @@ class MotorController:
                 except OSError:
                     break
                 await asyncio.sleep(self.cfg.command_interval_s)
+            if powering_off:
+                # Without this the armed power-cycle would start the robot again within 5 minutes.
+                # The new order replaces the pending one (docs/motor-protocol.md, section 6).
+                sent = 0
+                for _ in range(3):
+                    try:
+                        self._port.write(p.power(self.cfg.power_off_delay_s, p.POWER_OFF))
+                        sent += 1
+                    except OSError:
+                        pass
+                    await asyncio.sleep(self.cfg.command_interval_s)
+                if sent:
+                    log.info("powering off: the base switches off in %d s", self.cfg.power_off_delay_s)
+                else:
+                    log.warning("powering off, but the base didn't take the off order: it may restart the robot")
             self._port.close()
-        if self._task:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+        elif powering_off:
+            log.warning("powering off with no link to the base: it may restart the robot within 5 minutes")
 
     async def _run(self) -> None:
         while not self._stopping:
@@ -514,6 +581,12 @@ def read_setup(path: str) -> dict | None:
         return None
 
 
+def same_secret(given: str, secret: str) -> bool:
+    """Constant-time comparison of a token or key. compare_digest raises TypeError on non-ASCII text (an error
+    page instead of "unauthorized"), so compare the bytes; any text then simply matches or not."""
+    return secrets.compare_digest(given.encode("utf-8", "surrogatepass"), secret.encode("utf-8", "surrogatepass"))
+
+
 def _clamp(v: float, lim: float) -> float:
     return max(-lim, min(lim, v))
 
@@ -539,11 +612,17 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
     """
     cfg = ctrl.cfg
     # The phone's "Rocky listening" switch is remembered next to the sleep state.
-    hub = MediaHub(cfg.brain_fps, os.path.join(os.path.dirname(cfg.sleep_state), "ears.json") if cfg.sleep_state else None)
+    hub = MediaHub(cfg.brain_fps, os.path.join(os.path.dirname(cfg.sleep_state), "ears.json") if cfg.sleep_state else None,
+                   asleep=lambda: ctrl.sleep.asleep)
     app = web.Application()
 
     def authorized(request: web.Request) -> bool:
-        return cfg.token is None or secrets.compare_digest(request.query.get("token", ""), cfg.token)
+        return cfg.token is None or same_secret(request.query.get("token", ""), cfg.token)
+
+    def is_screen(request: web.Request) -> bool:
+        """The robot's own screen or phone panel: on the robot itself, with this boot's screen key."""
+        return is_local(request) and (cfg.screen_key is None
+                                      or same_secret(request.query.get("screen_key", ""), cfg.screen_key))
 
     def is_local(request: web.Request) -> bool:
         # Behind `tailscale serve` (or any reverse proxy) every visitor arrives from 127.0.0.1,
@@ -579,8 +658,12 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
 
     async def robot_ws(request: web.Request) -> web.WebSocketResponse:
         # The robot page owns the cameras and microphone, so only the robot itself may take that role.
-        if not (is_local(request) or allow_remote_robot):
+        if not (is_screen(request) or allow_remote_robot):
             raise web.HTTPForbidden(text="the robot media page must run on the robot")
+        if ctrl.sleep.asleep:
+            # Asleep, the cameras and microphone stay closed: a page that started just as the robot fell asleep
+            # must not connect anyway. It learns about waking from /api/status, and then reloads.
+            raise web.HTTPServiceUnavailable(text="the robot is asleep")
         ws = web.WebSocketResponse(heartbeat=5.0)
         await ws.prepare(request)
         await hub.attach_robot(ws)
@@ -616,7 +699,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
     async def panel_ws(request: web.Request) -> web.WebSocketResponse:
         # The phone on the robot (beam-setup phone forwards its localhost:8080 over USB): its camera is a
         # media source, so like the robot page it must be on the robot itself.
-        if not (is_local(request) or allow_remote_robot):
+        if not (is_screen(request) or allow_remote_robot):
             raise web.HTTPForbidden(text="the panel must run on the phone attached to the robot")
         ws = web.WebSocketResponse(heartbeat=5.0)
         await ws.prepare(request)
@@ -636,13 +719,22 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
                     continue
+                if msg.data.startswith('{"type":"frame"'):
+                    if not ctrl.sleep.asleep:                 # the rear camera, only while the brain asked
+                        await hub.frame_from_panel(msg.data)
+                    continue
                 try:
                     m = json.loads(msg.data)
                     kind = m.get("type")
                     if kind == "sleep":
                         ctrl.go_to_sleep("someone at the robot")
+                        await hub.sleep_changed()
                     elif kind == "wake":
                         ctrl.wake_up("someone at the robot")
+                        await hub.sleep_changed()
+                    elif kind == "frame":                     # same as above, differently formatted JSON
+                        if not ctrl.sleep.asleep:
+                            await hub.frame_from_panel(msg.data)
                     else:
                         await hub.from_panel(m)
                 except (ValueError, TypeError, AttributeError):
@@ -654,7 +746,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
 
     async def brain_ws(request: web.Request) -> web.WebSocketResponse:
         # The brain sees the cameras and may drive, so it needs its own key (not just the page token).
-        if cfg.brain_key is None or not secrets.compare_digest(request.query.get("key", ""), cfg.brain_key):
+        if cfg.brain_key is None or not same_secret(request.query.get("key", ""), cfg.brain_key):
             raise web.HTTPForbidden(text="brain disabled or wrong key")
         ws = web.WebSocketResponse(heartbeat=5.0, max_msg_size=8 * 2**20)
         await ws.prepare(request)
@@ -668,6 +760,8 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                 snap = ctrl.snapshot()
                 snap["type"] = "telemetry"
                 snap["you_are_driving"] = ctrl.drive.owner is me
+                if ctrl.lidar is not None:                # finer than the driving page's, for the brain's map
+                    snap["scan"] = ctrl.lidar.scan()
                 try:
                     await ws.send_json(snap)
                 except ConnectionError:
@@ -723,6 +817,8 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                 snap["media"] = hub.snapshot()
                 snap["you_have_control"] = ctrl.drive.owner is me
                 snap["obstacle_off_by_you"] = ctrl.obstacle_off_for is me
+                snap["estop_by_you"] = ctrl.drive.estop and ctrl.drive.estop_by is me
+                snap["can_release_estop"] = ctrl.drive.estop and ctrl.may_release_estop(me)
                 try:
                     await ws.send_json(snap)
                 except ConnectionError:
@@ -746,14 +842,18 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                         ctrl.set_target(0.0, 0.0, me)
                     elif kind == "sleep":
                         ctrl.go_to_sleep(who or "a driver")
+                        await hub.sleep_changed()
                     elif kind == "wake":
                         ctrl.wake_up(who or "a driver")
+                        await hub.sleep_changed()
                     elif kind == "obstacle_stop":
                         ctrl.set_obstacle_stop(bool(m.get("on")), me)
                     elif kind == "estop":
-                        ctrl.set_estop(True)
+                        ctrl.set_estop(True, me, f"driving page {pid}")
                     elif kind == "release_estop":
-                        ctrl.set_estop(False)
+                        if not ctrl.set_estop(False, me, f"driving page {pid}"):
+                            await ws.send_json({"type": "denied", "reason": "only the page that pressed STOP, "
+                                                "or the one driving, can release it"})
                     elif kind == "rtc":
                         await hub.from_pilot(pid, m["data"])
                     elif kind == "rear_light":
@@ -818,6 +918,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
         while True:
             # "Busy" = someone drove in the last minute: the night waits until they're done.
             ctrl.sleep.tick(datetime.now(), busy=time.monotonic() - ctrl.drive.last_input < 60)
+            await hub.sleep_changed()
             await asyncio.sleep(10)
 
     tasks: list[asyncio.Task] = []
@@ -844,12 +945,22 @@ def main() -> None:
     ap.add_argument("--max-linear", type=float, default=Config.max_linear, help="m/s (default %(default)s)")
     ap.add_argument("--max-angular", type=float, default=Config.max_angular, help="rad/s (default %(default)s)")
     ap.add_argument("--deadman", type=float, default=Config.deadman_s, help="seconds (default %(default)s)")
+    ap.add_argument("--power-off-delay", type=int, default=Config.power_off_delay_s,
+                    help="on poweroff, the base switches off this many seconds after the server stops "
+                         "(default %(default)s; 0 = leave its 5-minute power-cycle armed)")
     ap.add_argument("--tag-mode", choices=["limiter", "board_time", "zero", "counter"], default=Config.tag_mode)
-    ap.add_argument("--token", help="require ?token=... on the page URL")
+    # Secrets come from the environment ($BEAM_TOKEN, $BEAM_BRAIN_KEY): any program on the robot can read a
+    # command line, but only this user and root can read its environment. The flags remain for development.
+    ap.add_argument("--token", default=os.environ.get("BEAM_TOKEN") or None,
+                    help="require ?token=... on the page URL (better: set $BEAM_TOKEN)")
     ap.add_argument("--setup-file", default=Config.setup_file, help=argparse.SUPPRESS)
     ap.add_argument("--tls-cert", help="serve HTTPS (needed for the pilot's microphone); see scripts/make-cert.sh")
     ap.add_argument("--tls-key")
-    ap.add_argument("--brain-key", help="enable the brain connection (face recognition etc.) with this shared key")
+    ap.add_argument("--brain-key", default=os.environ.get("BEAM_BRAIN_KEY") or None,
+                    help="enable the brain connection (face recognition etc.) with this shared key "
+                         "(better: set $BEAM_BRAIN_KEY)")
+    ap.add_argument("--screen-key", default=os.environ.get("BEAM_SCREEN_KEY") or None,
+                    help="per-boot key the robot screen and phone panel must show (better: set $BEAM_SCREEN_KEY)")
     ap.add_argument("--sleep-hours", help="sleep every night in this local-time window, e.g. 23:00-07:00")
     ap.add_argument("--backlight", default="auto",
                     help="screen backlight to switch off in sleep mode: a /sys/class/backlight/<name> path, "
@@ -880,11 +991,14 @@ def main() -> None:
                     help="development only: accept the robot media page from another machine")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+    for name in ("BEAM_TOKEN", "BEAM_BRAIN_KEY", "BEAM_SCREEN_KEY"):     # read: don't hand them on to child programs
+        os.environ.pop(name, None)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     cfg = Config(device=args.device, max_linear=min(args.max_linear, 1.0), max_angular=args.max_angular,
-                 deadman_s=args.deadman, tag_mode=args.tag_mode, token=args.token, setup_file=args.setup_file,
-                 brain_key=args.brain_key, sleep_hours=args.sleep_hours,
+                 deadman_s=args.deadman, power_off_delay_s=max(0, args.power_off_delay),
+                 tag_mode=args.tag_mode, token=args.token, setup_file=args.setup_file,
+                 brain_key=args.brain_key, screen_key=args.screen_key, sleep_hours=args.sleep_hours,
                  backlight=None if args.backlight == "none" else args.backlight,
                  light_color=args.light_color, sleep_state=args.sleep_state,
                  range_device=None if args.range_device == "none" else args.range_device,

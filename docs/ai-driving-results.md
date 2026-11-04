@@ -2,7 +2,7 @@
 
 Models on Synthetic (Standard plan), all through the same driver and tasks. See `docs/ai-driving.md`.
 
-## Rounds 1 and 2: shaking out the test (2026-10-25)
+## Shaking out the test: rounds 1 and 2 (2026-10-25)
 
 These rounds mainly found problems with the **test**, each fixed before the next round:
 
@@ -15,7 +15,7 @@ These rounds mainly found problems with the **test**, each fixed before the next
 | 90 s request timeout | GLM's long thinks failed as errors | 180 s |
 | 1.2 m "close enough" | Qwen failed at 1.24 m while facing the ball | 1.3 m (the task says "about 1 m") |
 
-Round 2 (2 runs per task, before the floor and timeout fixes):
+Round 2 (2 runs per task, before the floor and timeout fixes; round 1 has no score table here):
 
 | model | ball | kitchen | bed | success | avg steps | avg time | bumps | cost |
 |---|---|---|---|---|---|---|---|---|
@@ -36,9 +36,9 @@ Patterns already visible:
 
 ## Round 3: the real comparison (2026-10-25, all fixes in)
 
-4 models × 3 tasks × 2 runs, 20 steps max each. Raw results are on the VM in
-`~/beam-brain/bakeoff/20261025-174757/`: `results.json`, a map of every trial's path, and
-`scripts/bakeoff-log.py` for step-by-step logs.
+4 models × 3 tasks × 2 runs, 20 steps max each. Raw results stay on the brain host
+(not in this repository), in `~/beam-brain/bakeoff/20261025-174757/`: `results.json` and a map of every
+trial's path; `scripts/bakeoff-log.py` prints step-by-step logs from them.
 
 | model | ball | kitchen | bed | success | avg time per task | per step (think) | bumps | cut-off steps | cost (6 tasks) |
 |---|---|---|---|---|---|---|---|---|---|

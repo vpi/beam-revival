@@ -6,6 +6,8 @@ import time
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from beamctl.lidar import Lidar
+from beamctl.rangefinder import RangeSensor
 from beamctl.server import PRIORITY_BRAIN, Config, MotorController, build_app
 from beamctl.sim import SimulatedBoard
 
@@ -13,6 +15,8 @@ ME, OTHER, AI = object(), object(), object()
 
 
 class FakeRange:
+    lost = False
+
     def __init__(self, m, fresh=True):
         self.m, self.fresh = m, fresh
 
@@ -27,6 +31,8 @@ class FakeRange:
 
 
 class FakeLidar:
+    present, lost = True, False
+
     def __init__(self, points, fresh=True):
         self.points, self.fresh, self.at = points, fresh, time.monotonic()
 
@@ -65,23 +71,63 @@ def test_backing_away_and_turning_stay_free():
 
 
 def test_lidar_counts_only_whats_in_the_path():
-    # 0.4 m from the lidar straight ahead is 0.2 m in front of the robot: stop.
-    assert forward(ctrl(lid=FakeLidar([(0.0, 0.4)]))) == 0.0
+    # 0.26 m from the lidar straight ahead is 0.2 m in front of the robot (it sits 6 cm back): stop.
+    assert forward(ctrl(lid=FakeLidar([(0.0, 0.26)]))) == 0.0
     # Beside the robot (0.3 m to the right) isn't in its way.
     assert forward(ctrl(lid=FakeLidar([(90.0, 0.3)]))) == 0.6
     # Ahead and a little to the left, within the robot's width: in the way.
-    a = math.degrees(math.atan2(-0.2, 0.4))
-    assert forward(ctrl(lid=FakeLidar([(a % 360, math.hypot(0.4, 0.2))]))) == 0.0
+    a = math.degrees(math.atan2(-0.2, 0.26))
+    assert forward(ctrl(lid=FakeLidar([(a % 360, math.hypot(0.26, 0.2))]))) == 0.0
 
 
 def test_the_nearest_of_both_sensors_wins():
-    c = ctrl(FakeRange(1.5), FakeLidar([(0.0, 0.4)]))
+    c = ctrl(FakeRange(1.5), FakeLidar([(0.0, 0.26)]))
     assert forward(c) == 0.0 and c.ahead()["by"] == "lidar"
 
 
 def test_a_silent_sensor_means_crawling():
     assert forward(ctrl(FakeRange(None, fresh=False))) == pytest.approx(0.10)
     assert forward(ctrl(lid=FakeLidar([], fresh=False))) == pytest.approx(0.10)
+
+
+class OpenPort:
+    is_open = True
+
+
+def test_a_lost_sensor_means_crawling_until_it_is_back():
+    rng = RangeSensor()                                       # "auto", not found yet: as if there were none
+    c = ctrl(rng)
+    assert forward(c) == 0.6 and not c.ahead()["sensors"]
+    rng.expected = True                                       # it was seen, then unplugged (or a USB reset)
+    c.drive.last_input = 0.0
+    assert forward(c) == pytest.approx(0.10)
+    a = c.ahead()
+    assert a["lost"] and a["blind"] and a["sensors"]
+    rng.port, rng.mm, rng.at = OpenPort(), 2000, time.monotonic()    # back, and the way is clear
+    c.drive.last_input = 0.0
+    assert forward(c) == 0.6 and not c.ahead()["lost"]
+
+
+def test_a_lost_lidar_means_crawling_too():
+    lid = Lidar()
+    c = ctrl(lid=lid)
+    assert forward(c) == 0.6
+    lid.expected = True
+    c.drive.last_input = 0.0
+    assert forward(c) == pytest.approx(0.10) and c.ahead()["lost"]
+
+
+def test_a_sensor_named_on_the_command_line_is_expected_from_the_start():
+    assert forward(ctrl(RangeSensor("/nonexistent/distance"))) == pytest.approx(0.10)
+    assert forward(ctrl(lid=Lidar("/nonexistent/lidar"))) == pytest.approx(0.10)
+
+
+def test_the_obstacle_stop_does_not_redraw_the_lidar_view(monkeypatch):
+    lid = Lidar()
+    lid.port, lid.spinning, lid.at, lid.points = OpenPort(), True, time.monotonic(), [(0.0, 0.26)]
+    monkeypatch.setattr(Lidar, "bins", lambda self: pytest.fail("bins() at 100 Hz"))
+    c = ctrl(lid=lid)
+    assert forward(c) == 0.0 and c.ahead()["by"] == "lidar"
 
 
 def test_a_driver_may_turn_it_off_for_themselves_only():

@@ -99,6 +99,17 @@
   #aiCard textarea { resize: vertical; min-height: 54px; margin: 6px 0; }
   .aibtn { border: 0; border-radius: 6px; padding: 6px 12px; font: inherit; font-weight: 700; cursor: pointer;
            background: var(--ai); color: #fff; }
+  #mapImg { width: 100%; margin-top: 8px; border-radius: 6px; image-rendering: pixelated; display: none; }
+  #mapBox { position: relative; }
+  #mapRobot { position: absolute; width: 24px; height: 24px; margin: -12px 0 0 -12px; display: none; pointer-events: none; }
+  #mapRobot.unsure { opacity: 0.45; }
+  .placesHead { font-size: 15px; margin: 14px 0 4px; }
+  .placeRow { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+  .placeRow input { flex: 1; min-width: 0; padding: 5px 8px; border-radius: 6px; border: 1px solid #555;
+    background: transparent; color: inherit; font: inherit; }
+  #placeList { list-style: none; padding: 0; margin: 6px 0 0; }
+  .mapPlace { position: absolute; transform: translate(-50%, -50%); pointer-events: none; font-size: 11px;
+    color: #fff; background: #2f6fde; border-radius: 8px; padding: 0 5px; white-space: nowrap; }
   .ailog { font-size: 12px; color: var(--muted); max-height: 140px; overflow: auto; margin-top: 6px; }
   .ailog div { padding: 2px 0; border-bottom: 1px dashed var(--line); }
   .rockyform { display: flex; gap: 6px; margin: 6px 0; }
@@ -228,8 +239,32 @@
       <textarea id="aiTask" placeholder="e.g. Find the red ball and stop in front of it"></textarea>
       <button class="aibtn" id="aiStart">Start</button>
       <button class="linkbtn" id="aiStop">Stop</button>
+      <button class="linkbtn" id="aiDock" title="The AI backs the robot onto its charger, guided by the marker sheet behind the dock">🔌 Dock on the charger</button>
       <p class="help">Any drive key, the joystick or STOP takes over from the AI immediately.</p>
       <div class="ailog" id="aiLog"></div>
+    </div>
+
+    <div class="card hiddenCard" id="mapCard">
+      <h2>🗺️ Map</h2>
+      <p class="help" id="mapHelp">Start mapping, drive the robot slowly round the rooms it may go in (turn gently), then
+        finish: the brain draws the floor plan from the lidar. Starting and ending on the charger marks the dock.</p>
+      <button class="linkbtn" id="mapBtn">Start mapping</button>
+      <div class="ailog" id="mapState"></div>
+      <div id="mapBox">
+        <img id="mapImg" alt="The robot's floor map">
+        <svg id="mapRobot" viewBox="-12 -12 24 24" aria-label="The robot on the map">
+          <circle r="7" fill="#e5484d" stroke="#fff" stroke-width="2"/><path d="M6 -4 L12 0 L6 4 Z" fill="#e5484d"/>
+        </svg>
+      </div>
+      <div class="ailog" id="mapWhere"></div>
+      <h3 class="placesHead">📍 Places</h3>
+      <p class="help">Drive the robot to a spot, facing the way it should stand there, and save it. More than one name:
+        separate them with commas ("living room, lounge"). Then Go, or tell Rocky "go to the kitchen".</p>
+      <form id="placeForm" class="placeRow">
+        <input id="placeNames" placeholder="kitchen" maxlength="120" autocomplete="off">
+        <button class="linkbtn" type="submit">Save this spot</button>
+      </form>
+      <ul id="placeList"></ul>
     </div>
 
     <div class="card hiddenCard" id="rockyCard">
@@ -308,6 +343,10 @@
       else if (m.type === "people") renderPeople(m.people || []);
       else if (m.type === "notice") flash(m.text, "info", 4000);
       else if (m.type === "ai") onAi(m);
+      else if (m.type === "map_status") onMapStatus(m);
+      else if (m.type === "map") onMap(m);
+      else if (m.type === "map_pose") onMapPose(m);
+      else if (m.type === "places") onPlaces(m);
       else if (m.type === "rocky") onRocky(m);
       else if (m.type === "rocky_voice") onRockyVoice(m);
       else if (m.type === "rocky_personality") onRockyPersonality(m);
@@ -420,7 +459,109 @@
     if (!task) { flash("Type a task for the AI first", "warn"); return; }
     send({ type: "brain", data: { kind: "ai_task", task, model: $("aiModel").value } });
   });
+  $("aiDock").addEventListener("click", () => {
+    // It moves the robot by itself: start it from about 1.3-2 m in front of the dock, facing it.
+    if (!ask("The AI will drive the robot onto its charger. Start it facing the dock, about 1.3–2 m away, and keep STOP at hand.")) return;
+    send({ type: "brain", data: { kind: "dock" } });
+  });
   const stopAi = () => send({ type: "brain", data: { kind: "ai_stop" } });
+
+  // ---------- the lidar map: recorded while a person drives, built on the brain ----------
+  let mapping = false;
+  $("mapBtn").addEventListener("click", () => {
+    if (!mapping && mapInfo && !ask("Make a new map? It replaces the current one when you finish. Start on the "
+        + "charger, drive round every room it may go in, and end on the charger. Saved places stay where they are.")) return;
+    send({ type: "brain", data: { kind: mapping ? "map_stop" : "map_start" } });
+  });
+  function onMapStatus(m) {
+    mapping = !!m.recording;
+    $("mapBtn").textContent = mapping ? "Finish mapping" : "Start mapping";
+    $("mapBtn").disabled = !!m.building;
+    $("mapState").textContent = m.building ? "Building the map…"
+      : mapping ? `Mapping: ${m.scans} scans, ${m.metres} m driven, ${Math.floor(m.seconds / 60)}:${String(m.seconds % 60).padStart(2, "0")}` : "";
+  }
+  let mapInfo = null;
+  // Where the robot is on the map: a red dot pointing its way (faded while unsure), placed by the map's
+  // own scale (metres per pixel, north up). Margin top 8 px: the image's own.
+  function onMapPose(p) {
+    const dot = $("mapRobot");
+    const here = mapInfo && p.state !== "searching";
+    dot.style.display = here ? "block" : "none";
+    $("mapWhere").textContent = !mapInfo ? "" : p.state === "searching" ? "Working out where it is on the map…"
+      : p.state === "unsure" ? "Not sure where it is: the lidar doesn't quite fit the map here." : "";
+    if (!here) return;
+    const at = mapPx(p.x, p.y);
+    dot.style.left = at.left;
+    dot.style.top = at.top;
+    dot.style.transform = `rotate(${-p.th}deg)`;
+    dot.classList.toggle("unsure", p.state === "unsure");
+  }
+  function mapPx(x, y) {
+    const k = $("mapImg").clientWidth / mapInfo.width;
+    return { left: ((x - mapInfo.x0) / mapInfo.res * k) + "px",
+             top: (8 + (mapInfo.height - (y - mapInfo.y0) / mapInfo.res) * k) + "px" };
+  }
+
+  // ---------- named places: saved where the robot stands, then Go (or "go to the kitchen" to Rocky) ----------
+  let places = [];
+  $("placeForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const names = $("placeNames").value.trim();
+    if (!names) return;
+    send({ type: "brain", data: { kind: "place_add", names } });
+    $("placeNames").value = "";
+  });
+  function onPlaces(m) {
+    places = m.places || [];
+    const list = $("placeList");
+    list.replaceChildren();
+    for (const p of places) {
+      const li = document.createElement("li");
+      li.className = "placeRow";
+      const names = document.createElement("input");
+      names.value = p.names.join(", ");
+      names.title = p.dock ? "The charger: going here means docking" : "Names, separated by commas";
+      names.addEventListener("change", () => send({ type: "brain", data: { kind: "place_rename", id: p.id, names: names.value } }));
+      const go = document.createElement("button");
+      go.className = "linkbtn";
+      go.textContent = p.dock ? "🔌 Go" : "Go";
+      go.addEventListener("click", () => send({ type: "brain", data: { kind: "goto", id: p.id } }));
+      li.append(names, go);
+      if (!p.dock) {
+        const del = document.createElement("button");
+        del.className = "linkbtn";
+        del.textContent = "✕";
+        del.title = "Delete this place";
+        del.addEventListener("click", () => {
+          if (ask(`Delete the place “${p.names[0]}”?`)) send({ type: "brain", data: { kind: "place_remove", id: p.id } });
+        });
+        li.append(del);
+      }
+      list.append(li);
+    }
+    drawPlaces();
+  }
+  function drawPlaces() {
+    document.querySelectorAll(".mapPlace").forEach((el) => el.remove());
+    if (!mapInfo || $("mapImg").style.display === "none") return;
+    for (const p of places) {
+      if (p.dock) continue;                      // the dock is the green dot
+      const tag = document.createElement("div");
+      tag.className = "mapPlace";
+      tag.textContent = p.names[0];
+      Object.assign(tag.style, mapPx(p.x, p.y));
+      $("mapBox").append(tag);
+    }
+  }
+  addEventListener("resize", drawPlaces);
+  $("mapImg").addEventListener("load", drawPlaces);
+  function onMap(m) {
+    mapInfo = { x0: m.x0, y0: m.y0, res: m.res, width: m.width, height: m.height };
+    $("mapImg").src = "data:image/png;base64," + m.png;
+    $("mapImg").style.display = "block";
+    if (!mapping) $("mapState").textContent = `Map from ${m.built}: ${m.metres} m driven, ${m.scans} scans`
+      + (m.dock ? ", dock marked (green)" : "") + `. Fit ${Math.round(m.fit * 100)} %.`;
+  }
   $("aiStop").addEventListener("click", stopAi);
   $("aiTakeOver").addEventListener("click", () => { stopAi(); send({ type: "stop" }); });
 
@@ -497,7 +638,7 @@
     personaCount();
   });
   $("personaReset").addEventListener("click", () => {
-    if (!persona || !confirm("Put Rocky's personality back to the default? Your version is not kept.")) return;
+    if (!persona || !ask("Put Rocky's personality back to the default? Your version is not kept.")) return;
     $("personaText").value = persona.text;               // drop unsaved edits, so the default replaces them
     send({ type: "brain", data: { kind: "personality", text: "" } });
   });
@@ -508,6 +649,7 @@
     $("rockyCard").classList.toggle("hiddenCard", !brainOnline);
     $("peopleCard").classList.toggle("hiddenCard", !brainOnline);
     $("aiCard").classList.toggle("hiddenCard", !brainOnline);
+    $("mapCard").classList.toggle("hiddenCard", !brainOnline);
     $("frState").textContent = !brainOnline ? "off" : brainPaused ? "paused" : "on";
     $("pauseBtn").textContent = brainPaused ? "Resume recognition" : "Pause recognition";
     if (!brainOnline || brainPaused) { lastFaces = null; drawFaces(); }
@@ -539,7 +681,7 @@
   addEventListener("resize", drawFaces);
 
   function nameFace(id) {
-    const name = (prompt("Who is this? The robot will greet them by this name.") || "").trim();
+    const name = (askText("Who is this? The robot will greet them by this name.") || "").trim();
     if (name) send({ type: "brain", data: { kind: "enroll", face_id: id, name } });
   }
 
@@ -556,7 +698,7 @@
       who.appendChild(small);
       const forget = document.createElement("button"); forget.className = "linkbtn"; forget.textContent = "Forget";
       forget.addEventListener("click", () => {
-        if (confirm(`Forget ${p.name}? Their face data is deleted.`)) send({ type: "brain", data: { kind: "forget", name: p.name } });
+        if (ask(`Forget ${p.name}? Their face data is deleted.`)) send({ type: "brain", data: { kind: "forget", name: p.name } });
       });
       row.append(img, who, forget);
       list.appendChild(row);
@@ -614,15 +756,24 @@
   $("speed").addEventListener("input", () => { $("speedLabel").textContent = $("speed").value + "%"; });
   $("obstacleStop").addEventListener("change", (e) => {
     const on = e.target.checked;
-    if (!on && !confirm("Turn off the obstacle stop? The robot will then drive into whatever is in front of it. " +
+    if (!on && !ask("Turn off the obstacle stop? The robot will then drive into whatever is in front of it. " +
                         "It's only off while you drive, and back on when you leave this page.")) {
       e.target.checked = true;
       return;
     }
     send({ type: "obstacle_stop", on });
   });
+  // A sensor that was there and has gone (e.g. off USB). The server may say which: true, a name or a list.
+  function sensorLost(O) {
+    const L = O && O.lost;
+    if (!L || (Array.isArray(L) && !L.length)) return null;
+    return Array.isArray(L) ? L.join(" + ") : typeof L === "string" ? L : "sensor";
+  }
   function obstacleText(O, mine) {
     if (mine) return "OFF";
+    if (O.active === false) return O.off ? "off (another driver turned it off for themselves)" : "off";
+    const lost = sensorLost(O);
+    if (lost) return `on · ${lost === "sensor" ? "sensor" : lost + " sensor"} LOST, crawling`;
     if (O.blind) return "on · sensor silent, crawling";
     if (O.max_forward <= 0) return `on · blocked, ${(O.gap_m ?? 0).toFixed(2)} m ahead`;
     if (O.gap_m != null && O.max_forward < last.drive.max_linear) return `on · slowing, ${O.gap_m.toFixed(2)} m ahead`;
@@ -644,10 +795,17 @@
     for (const k of keys) { lin += KEYMAP[k][0]; ang += KEYMAP[k][1]; }
     input.kb = [Math.max(-1, Math.min(1, lin)), Math.max(-1, Math.min(1, ang))];
   }
-  // Losing focus must never leave the robot driving.
-  function releaseAll() { keys.clear(); updateKb(); input.joy = [0, 0]; centerKnob(); }
+  // Losing focus must never leave the robot driving. The stop goes out at once: a hidden page's timers are slowed.
+  function releaseAll() {
+    keys.clear(); updateKb(); joyId = null; input.joy = [0, 0]; centerKnob();
+    if (!sentZero && !estop) { send({ type: "stop" }); sentZero = true; }
+  }
   addEventListener("blur", releaseAll);
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
+  // A dialog takes the key-up of a held drive key, which would leave it "held" afterwards: let go of
+  // everything (and stop) before every confirm() or prompt().
+  function ask(text) { releaseAll(); return confirm(text); }
+  function askText(text) { releaseAll(); return prompt(text); }
 
   // On-screen joystick (mouse or touch)
   const joy = $("joy"), knob = $("knob");
@@ -667,12 +825,30 @@
     input.joy = [-dy / R, -dx / R];
   }
 
+  // Only pads in the browser's "standard" layout (left stick 0/1, right stick 2/3, B = button 1): on others
+  // axis 2 is often a trigger resting at -1, a full-rate turn. And a stick axis counts only once it has been
+  // seen at rest, so one that never comes back to centre (stuck, or held while plugging in) never drives.
+  const padRest = new Map();                     // pad index -> {id, axes seen at rest}
+  let padWarned = false;
+  // Unplugged: forget it, so the same pad plugged in again with a stick held (or drifting) waits for centre too.
+  addEventListener("gamepaddisconnected", (e) => padRest.delete(e.gamepad.index));
   function readGamepad() {
     const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    const dz = (v) => (Math.abs(v) < 0.15 ? 0 : v);
     for (const gp of pads) {
-      if (!gp) continue;
-      const dz = (v) => (Math.abs(v) < 0.15 ? 0 : v);
-      input.pad = [-dz(gp.axes[1] || 0), -dz((gp.axes[2] ?? gp.axes[0]) || 0)];
+      if (!gp || gp.connected === false) continue;
+      if (gp.mapping !== "standard") {
+        if (!padWarned) { padWarned = true; flash("This gamepad's layout isn't supported, so it's ignored", "warn", 4000); }
+        continue;
+      }
+      let rest = padRest.get(gp.index);
+      if (!rest || rest.id !== gp.id) { rest = { id: gp.id, axes: new Set() }; padRest.set(gp.index, rest); }
+      const axis = (i) => {
+        const v = dz(gp.axes[i] || 0);
+        if (v === 0) rest.axes.add(i);
+        return rest.axes.has(i) ? v : 0;
+      };
+      input.pad = [-axis(1), -axis(2)];
       if (gp.buttons[1] && gp.buttons[1].pressed) setEstop(true);   // B / circle
       return;
     }
@@ -692,7 +868,21 @@
   setInterval(tick, 50);
 
   // ---------- e-stop ----------
+  // Only the page that pressed STOP may release it, or the driver after a confirm; the server decides. It may
+  // say so ("can_release_estop", "estop_by_you"); without that, this page remembers pressing it and lets the
+  // server answer anyone else (it also frees the stop once the page that pressed it has gone).
+  let estopMine = false, estopAt = 0;
+  const said = (k) => (last && typeof last[k] === "boolean" ? last[k] : null);
+  const estopIsMine = () => said("estop_by_you") ?? estopMine;
+  const canRelease = () => said("can_release_estop") ?? (estopIsMine() || !!(last && last.you_have_control));
   function setEstop(on) {
+    if (!on) {
+      if (said("can_release_estop") === false) {
+        flash("Stopped from another page: only that page or the driver can release it", "warn", 4000);
+        return;
+      }
+      if (!estopIsMine() && !ask("Someone else pressed STOP. Release it and let the robot move again?")) return;
+    } else if (!estop) { estopMine = true; estopAt = Date.now(); }
     estop = on;
     send({ type: on ? "estop" : "release_estop" });
     releaseAll();
@@ -702,7 +892,7 @@
   // ---------- sleep mode ----------
   $("wakeBtn").addEventListener("click", () => { send({ type: "wake" }); $("sleepText").textContent = "Waking up…"; });
   $("sleepBtn").addEventListener("click", () => {
-    if (confirm("Put Beam to sleep? Its cameras, microphone and screen turn off until someone wakes it from this page."))
+    if (ask("Put Beam to sleep? Its cameras, microphone and screen turn off until someone wakes it from this page."))
       send({ type: "sleep" });
   });
   // The lidar's latest turn (nearest hit per few degrees, cm), front up, plus the low distance sensor in front.
@@ -762,7 +952,11 @@
     else if (connected && L && !L.connected) msg = ["Motor board not responding", "warn"];
     else if (last && last.obstacle_off_by_you) msg = ["Obstacle stop OFF: nothing stops you driving into things", "warn"];
     else if (D && D.obstacle && last.you_have_control && D.obstacle.active && D.obstacle.max_forward <= 0)
-      msg = [`Obstacle ${(D.obstacle.gap_m ?? 0).toFixed(2)} m ahead: forward blocked (back up or turn)`, "warn"];
+      msg = [`Obstacle ${(D.obstacle.gap_m ?? 0).toFixed(2)} m ahead: forward blocked (back up or turn)`
+             + (sensorLost(D.obstacle) ? "; a sensor is lost" : ""), "warn"];
+    else if (D && D.obstacle && D.obstacle.active && sensorLost(D.obstacle))
+      msg = [`Obstacle sensor lost${sensorLost(D.obstacle) === "sensor" ? "" : " (" + sensorLost(D.obstacle) + ")"}: `
+             + "forward speed held to a crawl", "warn"];
     else if (Date.now() < flashUntil) msg = flashMsg;
     if (msg) { b.textContent = msg[0]; b.className = "banner show " + msg[1]; }
     else b.className = "banner";
@@ -780,14 +974,18 @@
 
     renderSleep(m.sleep);
     const O = D.obstacle;
-    $("obstacleRow").classList.toggle("hiddenCard", !(O && O.sensors));
-    if (O && O.sensors) {
+    const showObstacle = !!(O && (O.sensors || sensorLost(O)));
+    $("obstacleRow").classList.toggle("hiddenCard", !showObstacle);
+    if (showObstacle) {
       if (document.activeElement !== $("obstacleStop")) $("obstacleStop").checked = !m.obstacle_off_by_you;
       $("obstacleText").textContent = obstacleText(O, m.obstacle_off_by_you);
     }
     estop = D.estop;
+    if (!D.estop && Date.now() - estopAt > 2000) estopMine = false;   // (a status sent before our press got there)
     const st = $("estop");
-    st.textContent = D.estop ? "STOPPED · tap to release" : "STOP";
+    st.textContent = !D.estop ? "STOP" : canRelease() ? "STOPPED · tap to release" : "STOPPED by another page";
+    st.title = !D.estop ? "Space" : canRelease() ? "Release the stop"
+      : "Only the page that pressed STOP, or the driver, can release it (anyone, once that page has closed)";
     st.classList.toggle("latched", D.estop);
 
     const moving = Math.abs(D.commanded_linear) > 0.01 || Math.abs(D.commanded_angular) > 0.01;

@@ -39,6 +39,12 @@ On the phone, once:
 
 Each new USB stick has its own key, so step 5 comes once per stick.
 
+**Use a phone with nothing else on it** (a factory reset is best). Over USB the phone reaches the robot's
+port 8080 as if it were the robot itself. The panel page proves it's the real panel with a key the robot
+makes fresh at every boot and puts only in the URL it opens on the phone, so other apps can't take over the
+panel or the robot screen. But without an `ACCESS_TOKEN` in `beam.conf`, any app on the phone could still
+open the driving page, like anyone else who reaches the robot.
+
 ## How it behaves
 
 | Robot | Phone |
@@ -46,6 +52,7 @@ Each new USB stick has its own key, so step 5 comes once per stick.
 | Awake, nobody connected | panel on screen, "Nobody is watching", rear camera **closed** |
 | Awake, a driver connected | amber "Camera on · *name* can see and hear you", rear camera streaming |
 | **Call owner** pressed | every connected driving page shows a banner, plays a chime and blinks its tab |
+| The AI docks the robot | rear camera on, sent to the brain (sharper, 640×480) until docking ends; the phone says "🤖 The AI is using the rear camera to back onto the charger" |
 | Asleep | phone screen off, camera closed. Press the phone's power button to get the **Wake up** button; the screen goes dark again after 30 s |
 
 The robot keeps the screen on while awake and reopens the panel if Chrome is closed or the phone is

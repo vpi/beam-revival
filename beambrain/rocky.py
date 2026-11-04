@@ -66,7 +66,8 @@ SETTING = """Where you are: you live in a Beam telepresence robot: a tall robot 
 a face, a camera in the head, a speaker and a microphone. People far away drive you around the home and talk \
 through you; when they type to you, you answer out loud to the room. When nobody is driving, people in the room \
 can talk to you directly by saying "hey Rocky"; what they say reaches you through speech recognition, which \
-sometimes mishears words, so make the best sense of it."""
+sometimes mishears words (accents especially), so make the best sense of it; if it still doesn't make sense, \
+don't guess: ask them to say it again, in a few words."""
 
 RULES = f"""Rules for every reply (your words are spoken aloud):
 - Short. One to {MAX_SENTENCES} sentences, never more; anything past that is cut off.
@@ -78,8 +79,15 @@ your face while you speak.
 
 Seeing (be honest):
 <<SEEING>>
-- You cannot drive yourself in this conversation. If asked to move, say the driver does that.
+<<MOVING>>
 """
+NO_MOVING = "- You cannot drive yourself in this conversation. If asked to move, say the driver does that."
+MOVING = """\
+- You can drive yourself to the places on your map with the go_to tool. Places: <<PLACES>>. "Dock" and \
+"charger" (and charging, resting, going home) mean your charger.
+- Go only when they clearly ask you to go somewhere. If you are not sure what they said or which place they mean, \
+do NOT move: ask one short question ("Question: kitchen?") and go when they say yes. A place not on your map: say \
+so and name the ones you know. After go_to answers, say in a few words where you are going (or why not)."""
 BLIND = """\
 - You get no pictures from your cameras right now, only the names of people your face recognition knows and \
 sees in front of you (below, when there are any). Never describe the room, what people wear or do, or anything \
@@ -94,10 +102,22 @@ know people's names only from your face recognition (below, when it knows someon
 - Be kind about people. Describe what they hold or do, not their bodies."""
 
 
-def system_prompt(personality: str, eyes: bool) -> str:
-    """The whole system prompt: his personality (the editable part; empty = the default), then the fixed rest."""
-    rules = RULES.replace("<<SEEING>>", EYES if eyes else BLIND)
+def system_prompt(personality: str, eyes: bool, places: list[str] | None = None) -> str:
+    """The whole system prompt: his personality (the editable part; empty = the default), then the fixed rest.
+    places: the names he may drive to (None: he can't drive in this conversation)."""
+    moving = MOVING.replace("<<PLACES>>", ", ".join(places)) if places else NO_MOVING
+    rules = RULES.replace("<<SEEING>>", EYES if eyes else BLIND).replace("<<MOVING>>", moving)
     return f"{personality.strip() or PERSONALITY}\n\n{SETTING}\n\n{rules}"
+
+
+def go_tool(places: list[str]) -> dict:
+    return {"type": "function", "function": {
+        "name": "go_to",
+        "description": "Drive yourself to a place on your map (the dock or charger: back onto your charger). "
+                       "Starts the trip and answers at once.",
+        "parameters": {"type": "object", "properties": {
+            "place": {"type": "string", "enum": places, "description": "Which place."}},
+            "required": ["place"]}}}
 
 
 LOOK_TOOL = {"type": "function", "function": {
@@ -164,10 +184,12 @@ def situation(sender: str | None, in_view: list[str], spoken: bool = False) -> s
 
 
 class Rocky:
-    def __init__(self, llm: LLM, temperature: float = 0.7, home=None, eyes=None):
+    def __init__(self, llm: LLM, temperature: float = 0.7, home=None, eyes=None, trips=None):
         """home: a beambrain.home.HomeAssistant, or None for no home control.
-        eyes: async (camera: "head" | "floor") -> base64 JPEG or None; None = no sight."""
-        self.llm, self.temperature, self.home, self.eyes = llm, temperature, home, eyes
+        eyes: async (camera: "head" | "floor") -> base64 JPEG or None; None = no sight.
+        trips: the brain's named places: .names() -> [str], async .go(name, spoken) -> (started, text); None = he
+        can't drive himself."""
+        self.llm, self.temperature, self.home, self.eyes, self.trips = llm, temperature, home, eyes, trips
         self.personality = PERSONALITY      # changed from the driving page (brain.py remembers it)
         self.history: list[dict] = []
         self.last_at = 0.0
@@ -182,9 +204,20 @@ class Rocky:
             self.history = []
         self.last_at = now
         user = {"role": "user", "content": f"{sender or ('Someone' if spoken else 'Driver')}: {text}"}
-        prompt = system_prompt(self.personality, self.eyes is not None)
+        # Driving himself: for the same people who may switch things (the room, the household's drivers).
+        places = self.trips.names() if self.trips is not None and may_control else None
+        prompt = system_prompt(self.personality, self.eyes is not None, places)
         system = f"{prompt}\n{situation(sender, in_view or [], spoken)}"
+        now = getattr(self.trips, "now", None)
+        trip = now() if callable(now) else None
+        if trip:
+            # Without this, asked mid-trip he went by the conversation and named the wrong place.
+            system += (f" You are driving yourself right now: {trip}. If they ask where you are going, say that; "
+                       "don't start another trip until it's over.")
         tools = [LOOK_TOOL] if self.eyes else []
+        if places:
+            tools.append(go_tool(places))
+        went = False
         home_tools = []
         if self.home is not None:
             if may_control:
@@ -223,10 +256,20 @@ class Rocky:
                     if ok:
                         pictures.append((camera, jpeg))
                     actions.append({"tool": "look", "args": {"camera": camera}, "ok": ok})
+                elif call["name"] == "go_to" and places:
+                    if went:
+                        ok, out = False, "Not done: one trip at a time."
+                    else:
+                        went = True
+                        ok, out = await self.trips.go(str(call["arguments"].get("place", "")), spoken)
+                    actions.append({"tool": "go_to", "args": call["arguments"], "ok": ok})
+                    log.info("go_to -> %s", "started" if ok else "not started")
                 elif any(t["function"]["name"] == call["name"] for t in home_tools):
                     ok, out = await self.home.call(session, call["name"], call["arguments"])
                     actions.append({"tool": call["name"], "args": call["arguments"], "ok": ok})
-                    log.info("home: %s %s -> %s", call["name"], call["arguments"], "ok" if ok else "failed")
+                    # Not the arguments' values: they can be words said in the room (e.g. a shopping list item).
+                    log.info("home: %s (%d arguments) -> %s", call["name"], len(call["arguments"] or {}),
+                             "ok" if ok else "failed")
                 else:
                     ok, out = False, f"No such tool: {call['name']}"
                 messages.append({"role": "tool", "tool_call_id": raw.get("id", ""), "content": out})

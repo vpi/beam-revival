@@ -58,6 +58,8 @@ tar -C "$PROJECT" -czf - --exclude=__pycache__ beamctl docs README.md -C image r
       sudo systemctl daemon-reload
       for unit in "$STAGE"/rootfs/etc/systemd/system/beam-*.service; do sudo systemctl enable -q "$(basename "$unit")"; done
       sudo udevadm control --reload
+      # Re-apply beam.conf with the new beam-setup, so the server settings it writes match the new code.
+      sudo systemctl restart beam-config || true
       sudo systemctl restart beam-server
       sudo systemctl start beam-cameras || true
       sudo systemctl restart beam-display || true

@@ -17,6 +17,8 @@ import contextlib
 import json
 import logging
 import os
+import re
+import signal
 import time
 from pathlib import Path
 
@@ -34,6 +36,8 @@ from .tracker import Tracker
 from .wave import WaveDetector
 
 log = logging.getLogger("beambrain")
+
+REPLACED_CLOSE_CODE = 4000   # the robot server closes with this when another brain takes our place (signaling.py)
 
 
 class Brain:
@@ -56,6 +60,15 @@ class Brain:
         self.last_jpeg: str | None = None    # base64, head camera
         self.last_frame_at = 0.0
         self.frames: dict[str, tuple[str, float]] = {}   # cam -> (base64 jpeg, received at)
+        self.snapshot_dir = os.path.expanduser("~/beam-brain/calibration")   # save_snapshot()
+        self.maps_dir: Path | None = None                                    # the lidar map (lidarmap.py); main() sets it
+        self.mapping = None                                                   # a Recorder while mapping
+        self._map_status_at = 0.0
+        self.localizer = None                                                 # where it is on the map (localize.py)
+        self._localizing: asyncio.Task | None = None
+        self._pose_sent: tuple[dict, float] = ({}, 0.0)
+        self._places = None                                                   # named places on it (places.py)
+        self.camera = None             # the robot's measured cameras (geometry.CameraModel); None = simulator's
         self.human_took_over = asyncio.Event()
         self.telemetry_listeners: list = []      # e.g. the AI driver's breadcrumb tracker
         self.driver_task: asyncio.Task | None = None
@@ -74,12 +87,24 @@ class Brain:
         self.waves: WaveDetector | None = None   # beambrain/wave.py: a wave wakes him too (needs the face engine)
         self.listening = False               # the server sends the microphone (awake, nobody driving)
         self.home_drivers: set[str] = set()  # Tailscale logins whose typed chats may control the home
+        self._tasks: set[asyncio.Task] = set()   # fire-and-forget tasks, held so they aren't garbage-collected
+        self.replaced = False                # another brain took our place on the robot: stand down
+
+    def spawn(self, coro) -> asyncio.Task:
+        """Run something in the background, keeping a reference until it ends."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     # --- connection ------------------------------------------------------------
 
     async def run(self, url: str, stop: asyncio.Event | None = None) -> None:
         """Connect and serve until stopped, reconnecting with backoff."""
         stop = stop or asyncio.Event()
+        with contextlib.suppress(NotImplementedError, RuntimeError):     # not on Windows, nor off the main thread
+            asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1, self.save_snapshot)
+            asyncio.get_running_loop().add_signal_handler(signal.SIGUSR2, lambda: self.spawn(self.move_test()))
         if self.ears is not None and not self.ears.thread.is_alive():
             try:
                 await asyncio.to_thread(self.ears.load)
@@ -96,6 +121,15 @@ class Brain:
                         log.info("connected to robot")
                         delay = 1.0
                         await self.serve(ws, stop)
+                    if ws.close_code == REPLACED_CLOSE_CODE:
+                        # Another brain connected with the same key and the server dropped us for it. Coming
+                        # back would only knock that one off in turn, over and over, so stay off (like the
+                        # robot page does) until this one is restarted. Exiting wouldn't do: systemd would
+                        # restart it at once.
+                        log.warning("another brain replaced this one on the robot; standing down until restarted")
+                        self.replaced = True
+                        await stop.wait()
+                        break
                 except (aiohttp.ClientError, OSError) as e:
                     # Not the error's text: aiohttp's includes the URL, which carries the brain key.
                     status = getattr(e, "status", None)
@@ -119,6 +153,10 @@ class Brain:
             await self.send_personality()
         # Ask for the robot's microphone; the server decides when it may come (awake, nobody driving).
         await self.send({"type": "ears", "on": self.rocky is not None and self.ears is not None})
+        await self.send_map()
+        await self.send_places()
+        if self.localizer is None and self._localizing is None:
+            self._localizing = asyncio.create_task(self.load_localizer())   # may rebuild an older map: ~15 s
         stopper = asyncio.create_task(stop.wait())
         try:
             while not stop.is_set():
@@ -134,26 +172,43 @@ class Brain:
                     continue
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     break
-                m = json.loads(msg.data)
-                kind = m.get("type")
-                if kind == "listen":
-                    await self.on_listen(bool(m.get("on")))
-                elif kind == "frame":
-                    self.on_frame(m)
-                elif kind == "telemetry":
-                    self.telemetry = m
-                    for listener in list(self.telemetry_listeners):
-                        listener(m)
-                elif kind == "denied":
-                    self.human_took_over.set()      # a person is driving: the AI must stand down
-                elif kind == "brain_cmd":
-                    await self.on_command(m.get("data") or {})
+                m: dict = {}
+                try:
+                    m = json.loads(msg.data)
+                    await self.on_message(m)
+                except Exception as e:
+                    # One bad message (e.g. a driving page sending a name where a number belongs) mustn't
+                    # take the whole brain down. Only the error's type: the message may hold words or names.
+                    log.warning("skipped a message the brain couldn't handle (%s)", type(e).__name__)
+                    if isinstance(m, dict) and m.get("type") == "telemetry" and self.driver is not None:
+                        self.driver.abort("couldn't read the robot's telemetry")   # driving blind: stop
         finally:
             stopper.cancel()
             self.ws = None
             await self.on_listen(False)
             if self.driver is not None:
                 self.driver.abort("lost connection to the robot")
+
+    async def on_message(self, m: dict) -> None:
+        kind = m.get("type")
+        if kind == "listen":
+            await self.on_listen(bool(m.get("on")))
+        elif kind == "frame":
+            self.on_frame(m)
+        elif kind == "telemetry":
+            self.telemetry = m
+            if self.mapping is not None:
+                self.mapping.feed(m)
+                if time.monotonic() - self._map_status_at > 1.0:
+                    await self.send_map_status()
+            if self.localizer is not None:
+                await self.localize(m)
+            for listener in list(self.telemetry_listeners):
+                listener(m)
+        elif kind == "denied":
+            self.human_took_over.set()      # a person is driving: the AI must stand down
+        elif kind == "brain_cmd":
+            await self.on_command(m.get("data") or {})
 
     async def send(self, msg: dict) -> None:
         async with self._send_lock:
@@ -172,7 +227,7 @@ class Brain:
         if self.engine is None or self.paused or self._busy:
             return                          # only ever work on the latest frame
         self._busy = True
-        asyncio.create_task(self._process(m))
+        self.spawn(self._process(m))
 
     async def _process(self, m: dict) -> None:
         try:
@@ -202,11 +257,265 @@ class Brain:
                 if t.name:
                     text = self.greeter.maybe_greet(t.name)
                     if text:
-                        asyncio.create_task(self.greet(text))   # Fish takes ~1 s; keep watching meanwhile
+                        self.spawn(self.greet(text))   # Fish takes ~1 s; keep watching meanwhile
         except Exception:
             log.exception("frame processing failed")
         finally:
             self._busy = False
+
+    def save_snapshot(self) -> None:
+        """Camera calibration (docs/ai-driving.md): `kill -USR1` the brain and it saves the latest frame of each
+        camera to ~/beam-brain/calibration/ (next to the data folder), on this computer only. Delete them when done."""
+        out = Path(self.snapshot_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        saved = 0
+        for cam, (jpeg, at) in self.frames.items():
+            if jpeg and time.monotonic() - at < 2.0:
+                (out / f"{stamp}-{cam}.jpg").write_bytes(base64.b64decode(jpeg))
+                saved += 1
+        log.info("calibration snapshot: saved %d camera frame(s)", saved)
+
+    async def move_test(self) -> None:
+        """Checking the AI's moves on the real robot (docs/ai-driving.md): `kill -USR2` the brain and it does the
+        one move in ~/beam-brain/calibration/move.txt ("turn 90", "drive 0.5", "dock", "dock-teach" on the charger),
+        labelled as the AI like any AI driving, stopped by any human input, and logs what the gyro and wheels measured."""
+        try:
+            kind, *rest = (Path(self.snapshot_dir) / "move.txt").read_text().split()
+            amount = float(rest[0]) if kind in ("turn", "drive") else 0.0
+            if kind not in ("turn", "drive", "dock", "dock-teach"):
+                raise ValueError(kind)
+        except (OSError, ValueError, IndexError) as e:
+            log.warning("move test: no valid move in move.txt (%s)", e)
+            return
+        await self.run_move(kind, amount)
+
+    def ai_driving(self) -> bool:
+        return self.driver_task is not None and not self.driver_task.done() and self.driver_task is not asyncio.current_task()
+
+    async def run_move(self, kind: str, amount: float = 0.0, place: dict | None = None) -> str | None:
+        """One move ("turn", "drive"), docking ("dock", "dock-teach") or going to a named place ("goto", place) by
+        the AI driver's own code: labelled as the AI on every screen, stopped by any human input or the AI card's
+        Stop, and logged with what the gyro and wheels measured. None if the AI driver is already busy."""
+        if self.ai_driving():
+            await self.send({"type": "notice", "text": "The AI is already driving."})
+            return None
+        from .dock import Docking
+        from .driver import AIDriver, Aborted
+        from .navigate import Planner, go_to
+        what = ("docking" if kind.startswith("dock") else f"going to “{place['names'][0]}”" if kind == "goto"
+                else f"move test: {kind} {amount:g}")
+        model = type("NoModel", (), {"model": "docking" if kind.startswith("dock") else
+                                     "map driving" if kind == "goto" else "move test"})()
+        d = AIDriver(self, model, what, camera=self.camera)
+        self.driver, self.driver_task = d, asyncio.current_task()
+        docking = Docking(self, d, (self.settings_path.parent if self.settings_path else Path(self.snapshot_dir)) / "dock.json")
+        self.human_took_over.clear()
+        before = dict(d._board())
+        outcome = "gave_up"
+        await d._label(True, action="docking: looking for the dock" if kind == "dock" else what)
+        try:
+            if kind == "dock":
+                result = await docking.run()
+            elif kind == "dock-teach":
+                result = await docking.teach()
+            elif kind == "goto":
+                loc = self.localizer
+                if loc is None or loc.state == "searching":
+                    result = "doesn't know where it is on the map"
+                else:
+                    planner = await asyncio.to_thread(Planner, loc.grid)
+                    why = await go_to(self, d, planner, (place["x"], place["y"], place["th"]), place["names"][0])
+                    result = f"couldn't get there: {why}" if why else "arrived"
+            else:
+                result = await (d.turn(amount) if kind == "turn" else d.drive(amount))
+            if isinstance(result, tuple):
+                result = result[0]
+            if kind not in ("dock", "dock-teach", "goto") or "docked: on the charger" in result or result == "arrived":
+                outcome = "done"
+        except Aborted as e:
+            result, outcome = f"stopped: {e}", "aborted"
+        finally:
+            await d._cmd(0.0, 0.0)
+            await self.send({"type": "stop"})
+            await self.send({"type": "rear_feed", "on": False})
+        await d._label(False, outcome=outcome, summary=result)
+        if kind.startswith("dock"):
+            await self.send({"type": "notice", "text": f"🤖 Docking: {result}"})
+        elif kind == "goto":
+            await self.send({"type": "notice", "text": f"🤖 Going to “{place['names'][0]}”: {result}"})
+        after = d._board()
+        dyaw = (after.get("yaw_deg", 0.0) - before.get("yaw_deg", 0.0) + 180) % 360 - 180
+        log.info("move test %s %g: %s | gyro %+.1f deg, wheels %+.3f m", kind, amount, result,
+                 dyaw, after.get("odometry_m", 0.0) - before.get("odometry_m", 0.0))
+        return result
+
+    # --- the lidar map (lidarmap.py): a person drives the robot round once ------------------------------------
+
+    async def start_mapping(self) -> None:
+        from .lidarmap import Recorder
+        if self.mapping is not None or self.maps_dir is None:
+            return
+        if not (self.telemetry or {}).get("scan"):
+            await self.send({"type": "notice", "text": "The lidar isn't sending scans: is the robot awake?"})
+            return
+        b = (self.telemetry or {}).get("board") or {}
+        if not (b.get("charging") or b.get("charger_detected")):
+            # The map is anchored at the dock: places, and docking by the map, rely on it.
+            await self.send({"type": "notice", "text": "Start mapping with the robot on its charger: the map is "
+                                                       "anchored at the dock (your places depend on that)."})
+            return
+        self.mapping = Recorder()
+        log.info("mapping: recording")
+        await self.send_map_status()
+
+    async def finish_mapping(self) -> None:
+        from .lidarmap import build, render, save_grid
+        rec, self.mapping = self.mapping, None
+        if rec is None:
+            return
+        await self.send_map_status(building=len(rec.rows) >= 10)
+        if len(rec.rows) < 10:
+            await self.send({"type": "notice", "text": "Too short to make a map: drive it round a little first."})
+            return
+        path = await asyncio.to_thread(rec.save, self.maps_dir)
+        log.info("mapping: %d scans over %.1f m saved; building the map", len(rec.rows), rec.metres)
+        t0 = time.monotonic()
+        built = await asyncio.to_thread(build, rec.rows)
+        if built.dock is None or built.dock != built.poses[0]:
+            log.info("mapping: didn't start on the charger; the map in use is kept")
+            await self.send_map_status()
+            await self.send({"type": "notice", "text": "Not used: that drive didn't start on the charger, so the map "
+                                                       "in use is kept (the drive is saved on the brain)."})
+            return
+        png, info = await asyncio.to_thread(render, built)
+        await asyncio.to_thread(save_grid, built, self.maps_dir / "map.npz")
+        info.update(recording=path.name, built=time.strftime("%Y-%m-%d %H:%M"), metres=round(rec.metres, 1))
+        (self.maps_dir / "map.png").write_bytes(png)
+        (self.maps_dir / "map.json").write_text(json.dumps(info) + "\n")
+        log.info("mapping: map built in %.0f s (%d scans used, median fit %.2f)", time.monotonic() - t0,
+                 info["scans"], info["fit"])
+        await self.send_map_status()
+        await self.send_map()
+        await self.load_localizer()
+
+    async def load_localizer(self) -> None:
+        """Track the robot on the saved map. A map made before the grid was kept is rebuilt from its recording."""
+        from .lidarmap import build, load, load_grid, save_grid
+        from .localize import Localizer
+        if self.maps_dir is None:
+            return
+        grid_path = self.maps_dir / "map.npz"
+        try:
+            if not grid_path.exists():
+                rec = json.loads((self.maps_dir / "map.json").read_text())["recording"]
+                built = await asyncio.to_thread(lambda: build(load(self.maps_dir / rec)))
+                await asyncio.to_thread(save_grid, built, grid_path)
+            grid, dock = await asyncio.to_thread(load_grid, grid_path)
+            self.localizer = await asyncio.to_thread(Localizer, grid, dock)
+            log.info("localize: map loaded")
+        except (OSError, ValueError, KeyError):
+            self.localizer = None                          # no map yet
+
+    async def localize(self, t: dict) -> None:
+        """Telemetry in: move the pose by the wheels and gyro, match a scan when one is due (in a worker thread,
+        one at a time), and tell the driving pages where the robot is."""
+        loc = self.localizer
+        loc.feed(t, time.monotonic())
+        if self._localizing is None or self._localizing.done():
+            job = loc.take()
+            if job is not None:
+                async def run():
+                    try:
+                        loc.apply(job, await asyncio.to_thread(loc.match, job))
+                    except Exception:
+                        log.exception("localize: matching failed")
+                self._localizing = asyncio.create_task(run())
+        snap, at = loc.snapshot(), time.monotonic()
+        last, last_at = self._pose_sent
+        if snap != last and at - last_at > 0.25 or at - last_at > 5.0:
+            self._pose_sent = (snap, at)
+            await self.send({"type": "map_pose", **snap})
+
+    # --- named places on the map (places.py): "go to the kitchen" -------------------------------------------
+
+    @property
+    def places(self):
+        from .places import Places
+        if self._places is None:
+            self._places = Places(self.maps_dir / "places.json" if self.maps_dir else None)
+        return self._places
+
+    def trips(self):
+        """What Rocky's go_to tool uses (rocky.py)."""
+        import types
+        return types.SimpleNamespace(names=lambda: self.places.all_names(), go=self.go_to_place, now=self.current_trip)
+
+    def current_trip(self) -> str | None:
+        """What the AI driver is doing right now ("going to “kitchen”", "docking", ...), or None."""
+        return getattr(self.driver, "task", None) if self.ai_driving() else None
+
+    async def send_places(self) -> None:
+        hint = getattr(self.ears, "hint", None)
+        if hint is not None:
+            hint(self.places.all_names())                   # so speech recognition expects these words
+        await self.send({"type": "places", "places": self.places.summary()})
+
+    async def add_place(self, names) -> None:
+        """A place where the robot stands now, facing the way it faces."""
+        loc = self.localizer
+        if loc is None or loc.pose is None or loc.state != "here":
+            await self.send({"type": "notice", "text": "The robot doesn't know where it is on the map right now: "
+                                                       "drive a little until the red dot shows, then save the spot."})
+            return
+        p = self.places.add(names, loc.pose)
+        if isinstance(p, str):
+            await self.send({"type": "notice", "text": p})
+        else:
+            log.info("places: saved a place (%d now)", len(self.places.items))
+            await self.send({"type": "notice", "text": f"Saved “{p['names'][0]}” where the robot stands."})
+        await self.send_places()
+
+    async def go_to_place(self, name: str, spoken: bool = False) -> tuple[bool, str]:
+        """Start going to a place by id or name (the dock: docking). Returns at once: (started, what to say)."""
+        from .places import DOCK
+        p = self.places.find(name)
+        why = (f"No place called “{name}”. Places: {', '.join(self.places.all_names())}." if p is None else
+               f"Already busy: {self.current_trip()}. Finish or stop that first." if self.ai_driving() else
+               "Doesn't know where it is on the map right now." if p["id"] != DOCK and (
+                   self.localizer is None or self.localizer.state == "searching") else None)
+        if why:
+            log.info("places: a trip%s not started: %s", " (asked by voice)" if spoken else "",
+                     "no such place" if p is None else "already driving" if self.ai_driving() else why)   # a task can be words
+            return False, why
+        label = p["names"][0]
+
+        async def trip():
+            result = await (self.run_move("dock") if p["id"] == DOCK else self.run_move("goto", place=p))
+            if spoken and self.rocky is not None and result is not None:     # asked in the room: say how it went
+                ok = result == "arrived" or "docked: on the charger" in result
+                await self.rocky_say(f"{label.capitalize()}. Here." if ok else f"Bad. Not get to {label}.",
+                                     "happy" if ok else "sad")
+        self.spawn(trip())
+        return True, f"Started going to “{label}”."
+
+    async def send_map_status(self, building: bool = False) -> None:
+        self._map_status_at = time.monotonic()
+        r = self.mapping
+        await self.send({"type": "map_status", "recording": r is not None, "building": building,
+                         "scans": len(r.rows) if r else 0, "metres": round(r.metres, 1) if r else 0,
+                         "seconds": round(time.time() - r.started) if r else 0})
+
+    async def send_map(self) -> None:
+        """The latest map, for the driving pages (only theirs: it's a floor plan of someone's home)."""
+        if self.maps_dir is None:
+            return
+        try:
+            png = (self.maps_dir / "map.png").read_bytes()
+            info = json.loads((self.maps_dir / "map.json").read_text())
+        except (OSError, ValueError):
+            return
+        await self.send({"type": "map", "png": base64.b64encode(png).decode(), **info})
 
     async def look(self, camera: str) -> str | None:
         """Rocky's eyes: a fresh frame (base64 JPEG) from the head or floor camera, or None if it isn't sending.
@@ -278,6 +587,26 @@ class Brain:
             await self.send_voice()
         elif kind == "personality":
             await self.set_personality(d.get("text"), d.get("sender"), d.get("login"))
+        elif kind == "map_start":
+            await self.start_mapping()
+        elif kind == "map_stop":
+            await self.finish_mapping()
+        elif kind == "dock":
+            self.spawn(self.run_move("dock"))
+        elif kind == "place_add":
+            await self.add_place(d.get("names"))
+        elif kind == "place_rename":
+            why = self.places.rename(str(d.get("id")), d.get("names"))
+            if why:
+                await self.send({"type": "notice", "text": why})
+            await self.send_places()
+        elif kind == "place_remove":
+            self.places.remove(str(d.get("id")))
+            await self.send_places()
+        elif kind == "goto":
+            ok, text = await self.go_to_place(str(d.get("id", "")))
+            if not ok:
+                await self.send({"type": "notice", "text": text})
         elif kind == "ai_stop":
             if self.driver is not None:
                 self.driver.abort("stopped from the driving page")
@@ -319,12 +648,14 @@ class Brain:
                                                                  may_control)
         except Exception as e:
             self.thinking_about = None
-            log.warning("Rocky's reply failed: %s", e)
+            # The error's type and HTTP status only: an AI service's error text can quote what was said.
+            status = re.match(r"HTTP \d+", str(e))
+            log.warning("Rocky's reply failed (%s%s)", type(e).__name__, f" {status[0]}" if status else "")
             await self.send({"type": "face", "emotion": "neutral"})
             await self.send({"type": "notice", "text": "Rocky couldn't think of a reply (the AI service failed)."})
             return
         self.thinking_about = None                       # from here on he's answering: too late to add words
-        log.info("Rocky [%s]: %s", emotion, words)
+        log.info("Rocky answered [%s], %d words", emotion, len(words.split()))   # never the words themselves
         voice, tts_s = await self.rocky_say(words, emotion)
         log.info("voice: %s, sound after %s s", voice, tts_s)
         await self.send({"type": "rocky", "sender": sender, "heard": text, "emotion": emotion, "text": words,
@@ -362,10 +693,15 @@ class Brain:
         """A finished spoken turn from the room (beambrain/ears.py)."""
         if not self.listening or self.rocky is None:
             return
+        if self.ai_driving() and self.driver is not None and re.search(r"\bstop", text, re.IGNORECASE):
+            # Nobody is at the controls while he listens: "stop" (no name needed) ends any AI driving at once.
+            self.driver.abort("someone in the room said stop")
+            log.info("heard 'stop' while the AI drove: stopped")
+            return
         action, words = self.wake.heard(text)
         if action == "ignore":
             log.info("heard speech not meant for Rocky (%d words%s)", len(text.split()),   # never its words
-                     ", his name without 'hey'" if self.wake.has_name(text) else "")
+                     ", his name not as 'hey Rocky' first" if self.wake.has_name(text) else "")
             return
         await self.send({"type": "rocky_awake", "seconds": self.wake.awake_s})
         if self.wake_reply is not None:
@@ -529,16 +865,21 @@ class Brain:
         if self.driver_task is not None and not self.driver_task.done():
             await self.send({"type": "notice", "text": "The AI is already working on a task."})
             return
-        llm = LLM(model or self.ai["model"], self.ai["key"])
-        self.driver = AIDriver(self, llm, task)
+        # As in the bake-off that chose the models (bakeoff.py): the slower ones take over a minute on hard steps.
+        llm = LLM(model or self.ai["model"], self.ai["key"], timeout_s=180)
+        self.driver = AIDriver(self, llm, task, camera=self.camera)
         self.driver_task = asyncio.create_task(self.driver.run())
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Beam+ brain: face recognition and greetings")
     ap.add_argument("--url", required=True, help="robot WebSocket, e.g. wss://beam.<tailnet>.ts.net/ws")
-    ap.add_argument("--key", required=True, help="BRAIN_KEY from the robot's beam.conf")
-    ap.add_argument("--token", help="ACCESS_TOKEN, if the robot uses one")
+    # Better in the environment ($BEAM_BRAIN_KEY, $BEAM_TOKEN; the service reads them from /etc/beam-brain.env):
+    # any program on this machine can read a command line.
+    ap.add_argument("--key", default=os.environ.get("BEAM_BRAIN_KEY") or None,
+                    help="BRAIN_KEY from the robot's beam.conf (better: set $BEAM_BRAIN_KEY)")
+    ap.add_argument("--token", default=os.environ.get("BEAM_TOKEN") or None,
+                    help="ACCESS_TOKEN, if the robot uses one (better: set $BEAM_TOKEN)")
     ap.add_argument("--models", default=str(Path.home() / "beam-brain" / "models"))
     ap.add_argument("--data", default=str(Path.home() / "beam-brain" / "data"))
     ap.add_argument("--cooldown", type=float, default=30 * 60, help="seconds between greetings per person")
@@ -557,6 +898,10 @@ def main() -> None:
                          "(speech in the room always may)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+    if not args.key:
+        ap.error("the brain key is needed: set $BEAM_BRAIN_KEY (or --key)")
+    for name in ("BEAM_BRAIN_KEY", "BEAM_TOKEN"):     # read: don't hand them on to child programs
+        os.environ.pop(name, None)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     url = f"{args.url}?role=brain&key={args.key}" + (f"&token={args.token}" if args.token else "")
@@ -573,6 +918,15 @@ def main() -> None:
     brain = Brain(FaceEngine(args.models), PeopleStore(Path(args.data) / "people.json"),
                   Speaker(args.models), greeter, ai)
     brain.settings_path = Path(args.data) / "rocky.json"
+    brain.snapshot_dir = str(Path(args.data).parent / "calibration")
+    brain.maps_dir = Path(args.data).parent / "maps"
+    if (Path(args.data) / "cameras.json").exists():          # written by `python3 -m beambrain.calibrate`
+        from .geometry import CameraModel
+        brain.camera = CameraModel.load(Path(args.data) / "cameras.json")
+        log.info("using the robot's measured cameras (cameras.json)")
+    # The household drivers also decide who may change Rocky's personality, so this holds with or without
+    # Home Assistant.
+    brain.home_drivers = {s.strip().lower() for s in args.home_drivers.split(",") if s.strip()}
     if ai:
         from .llm import LLM
         from .rocky import Rocky
@@ -582,12 +936,12 @@ def main() -> None:
             token = load_token(Path(args.data).parent / "ha.key")
             if token:
                 home = HomeAssistant(args.home_url, token)
-                brain.home_drivers = {s.strip().lower() for s in args.home_drivers.split(",") if s.strip()}
                 log.info("Rocky can control Home Assistant (room speech, and %d allowed driver(s))",
                          len(brain.home_drivers))
             else:
                 log.warning("--home-url given but no ~/beam-brain/ha.key; no home control")
-        brain.rocky = Rocky(LLM(ai["model"], ai["key"]), home=home, eyes=None if args.no_eyes else brain.look)
+        brain.rocky = Rocky(LLM(ai["model"], ai["key"]), home=home, eyes=None if args.no_eyes else brain.look,
+                            trips=brain.trips())
         fish_key = Path(args.data).parent / "fish.key"
         if fish_key.exists() and fish_key.read_text().strip():
             from .speech import FishVoice

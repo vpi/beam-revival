@@ -228,3 +228,117 @@ async def test_task_checks_score_correctly():
     async with Rig() as rig:                                          # still in the office
         assert not TASKS["ball"]["check"](rig.board, rig.world)[0]
         assert not TASKS["kitchen"]["check"](rig.board, rig.world)[0]
+
+
+def test_measured_cameras_match_the_calibration():
+    """A camera model from beambrain.calibrate turns pixels back into the floor points they were fitted on."""
+    import math
+
+    import cv2
+    import numpy as np
+
+    from beambrain.calibrate import _undistort, head_project
+    from beambrain.geometry import CameraModel
+
+    head = {"w": 640, "h": 480, "height": 1.3, "cam_x_from_front": -0.1, "yaw": 0.02, "pitch_down": 0.05,
+            "roll": 0.01, "f": 280.0, "k1": -0.13}
+    H = [[0.0, -0.002, 1.0], [-0.002, 0.0, 0.64], [0.0, 0.001, 1.0]]
+    floor = {"w": 640, "h": 480, "k": [0.5, 0.2], "centre": [300.0, 230.0], "H": H}
+    cam = CameraModel(head=head, floor=floor, axle_to_front_m=0.1, head_w=640, head_h=480)
+
+    floor_pts = np.array([[1.5, 0.0, 0.0], [2.5, 0.6, 0.0], [3.5, -0.4, 0.0]])
+    p = [head[k] for k in ("cam_x_from_front", "yaw", "pitch_down", "roll", "f", "k1")]
+    for (u, v), (ahead, left, _) in zip(head_project(p, floor_pts, 1.3, 640, 480), floor_pts):
+        got = cam.head_floor_point(u / 640, v / 480)
+        assert got is not None and abs(got[0] - (ahead + 0.1)) < 1e-3 and abs(got[1] - left) < 1e-3
+    assert cam.head_floor_point(0.5, 0.2) is None                        # above the horizon
+    assert cam.head_angle_left(0.2) > 0 > cam.head_angle_left(0.8)       # left of centre is to the left
+
+    uv = np.array([[320.0, 200.0], [250.0, 120.0], [400.0, 60.0]])
+    want = cv2.perspectiveTransform(_undistort(uv, floor["k"], np.array(floor["centre"]), 640).reshape(-1, 1, 2),
+                                    np.array(H)).reshape(-1, 2)
+    for (u, v), (ahead, left) in zip(uv, want):
+        got = cam.floor_point(u / 640, v / 480)
+        assert math.isclose(got[0], ahead + 0.1, abs_tol=1e-6) and math.isclose(got[1], left, abs_tol=1e-6)
+
+
+async def test_move_test_is_labelled_and_logged(tmp_path, caplog):
+    """The move test does one move from move.txt, shown as the AI on the screens, and logs what was measured."""
+    import asyncio
+    import logging
+
+    from beambrain.brain import Brain
+    from beambrain.greeter import Greeter
+    from beambrain.people import PeopleStore
+
+    brain = Brain(None, PeopleStore(":memory-not-used:"), None, Greeter())
+    sent = []
+    brain.send = lambda m: asyncio.sleep(0, sent.append(m))
+    brain.telemetry = {"board": {"yaw_deg": 10.0, "odometry_m": 0.0, "actual_linear": 0.0, "actual_angular": 0.0},
+                       "drive": {"driver": None}}
+    brain.snapshot_dir = str(tmp_path)
+    (tmp_path / "move.txt").write_text("turn 0\n")
+    with caplog.at_level(logging.INFO, logger="beambrain"):
+        await brain.move_test()
+    labels = [m for m in sent if m.get("type") == "ai"]
+    assert labels[0]["active"] and labels[0]["model"] == "move test" and not labels[-1]["active"]
+    assert {"type": "stop"} in sent
+    assert "move test turn 0: turned 0 degrees" in caplog.text
+
+
+async def test_dock_button_starts_docking_labelled_and_reports_back(tmp_path):
+    """The driving page's Dock button: docking runs as the AI (stoppable like any AI driving) and says how it went."""
+    import asyncio
+
+    from beambrain.brain import Brain
+    from beambrain.greeter import Greeter
+    from beambrain.people import PeopleStore
+
+    brain = Brain(None, PeopleStore(":memory-not-used:"), None, Greeter())
+    sent = []
+    brain.send = lambda m: asyncio.sleep(0, sent.append(m))
+    brain.telemetry = {"board": {"yaw_deg": 0.0, "odometry_m": 0.0, "actual_linear": 0.0, "actual_angular": 0.0},
+                       "drive": {"driver": None}}
+    brain.snapshot_dir = str(tmp_path)                  # nothing taught there: docking says so and stops
+    await brain.on_command({"kind": "dock"})
+    await asyncio.sleep(0.05)
+    await brain.driver_task
+    labels = [m for m in sent if m.get("type") == "ai"]
+    assert labels[0]["active"] and labels[0]["model"] == "docking"
+    assert not labels[-1]["active"] and labels[-1]["outcome"] == "gave_up"
+    assert {"type": "rear_feed", "on": False} in sent and {"type": "stop"} in sent
+    assert any(m.get("type") == "notice" and m["text"].startswith("🤖 Docking: not taught yet") for m in sent)
+
+
+class StuckBrain:
+    """A robot whose wheels don't move while the board still reports speed (as a Beam+'s actual_linear may)."""
+
+    def __init__(self, board):
+        import asyncio
+        self.telemetry = {"board": board, "drive": {}}
+        self.human_took_over = asyncio.Event()
+        self.sent = []
+
+    async def send(self, m):
+        self.sent.append(m)
+
+
+async def test_blocked_by_the_wheels_even_when_the_board_reports_speed():
+    """On a Beam+ the board's own speeds may not match the wheels, so a stall is also judged by odometry."""
+    brain = StuckBrain({"yaw_deg": 0.0, "odometry_m": 2.0, "actual_linear": 0.3, "actual_angular": 0.0})
+    msg, blocked = await AIDriver(brain, ScriptedLLM([]), "test").drive(1.0)
+    assert blocked and msg.startswith("BLOCKED after 0.00 m")
+    assert brain.sent[-1] == {"type": "drive", "linear": 0.0, "angular": 0.0}       # and it stopped
+
+
+def test_wheel_progress_counts_the_wheels_and_with_turns_the_gyro():
+    from beambrain.driver import WheelProgress
+
+    p = WheelProgress({"odometry_m": 0.0, "yaw_deg": 0.0}, 0.0)
+    assert not p.stopped({"odometry_m": 0.005, "yaw_deg": 0.0}, 0.2)           # not long enough yet
+    assert p.stopped({"odometry_m": 0.005, "yaw_deg": 30.0}, 0.4)              # under a centimetre: stopped
+    assert not p.stopped({"odometry_m": 0.02, "yaw_deg": 30.0}, 0.5)           # moved on
+    assert not WheelProgress({}, 0.0).stopped({}, 5.0)                          # no odometry: can't tell
+    t = WheelProgress({"odometry_m": 0.0, "yaw_deg": 359.0}, 0.0, turns=True)
+    assert not t.stopped({"odometry_m": 0.0, "yaw_deg": 3.0}, 0.4)            # turning on the spot is moving
+    assert t.stopped({"odometry_m": 0.0, "yaw_deg": 3.5}, 0.8)

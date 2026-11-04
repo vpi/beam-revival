@@ -28,10 +28,10 @@ echo $! >> "$PIDS"
 for _ in $(seq 20); do [ -e /tmp/beam-sim ] && break; sleep 0.1; done
 # --allow-remote-robot: lets you open /robot?test=1 from another machine to fake the robot's cameras.
 # A brain key in ~/beam-brain/brain.key enables the brain connection (see brain-host/).
-BRAIN=()
-[ -s "$HOME/beam-brain/brain.key" ] && BRAIN=(--brain-key "$(cat "$HOME/beam-brain/brain.key")")
+# Through the environment, not the command line, where any program could read it.
+[ -s "$HOME/beam-brain/brain.key" ] && export BEAM_BRAIN_KEY="$(cat "$HOME/beam-brain/brain.key")"
 nohup python3 -m beamctl.server --device /tmp/beam-sim --port "${PORT:-8080}" --allow-remote-robot \
-  --world-url http://127.0.0.1:8091 "${BRAIN[@]}" "$@" \
+  --world-url http://127.0.0.1:8091 "$@" \
   > /tmp/beam-server.log 2>&1 < /dev/null &
 echo $! >> "$PIDS"
 sleep 1.5

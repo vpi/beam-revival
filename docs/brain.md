@@ -44,9 +44,13 @@ arrive 3 times a second. The robot only captures and sends frames; all the work 
 ```bash
 brain-host/install.sh wss://beam-lab.<your-tailnet>.ts.net/ws "$(cat ~/beam-brain/brain.key)"
 ```
-This installs OpenCV, Piper (voice), faster-whisper (Rocky's speech recognition) and the models, writes `/etc/beam-brain.env`, and starts the
+This installs OpenCV, Piper (voice), faster-whisper (Rocky's speech recognition) and the models, writes `/etc/beam-brain.env`
+(only the first time: running it again keeps the file and your `BEAM_BRAIN_ARGS`), and starts the
 `beam-brain` service. To point it at a different robot, or back at the dev simulator,
 edit `BEAM_BRAIN_URL` in `/etc/beam-brain.env`, then `sudo systemctl restart beam-brain`.
+If the robot has an `ACCESS_TOKEN`, add `BEAM_TOKEN=<it>` to the same file. The key and token stay in that
+root-only file and reach the brain through its environment. Keep them out of `BEAM_BRAIN_ARGS`: any program on the
+machine can read a command line.
 Logs: `journalctl -u beam-brain -f`.
 
 **Robot:** use the **lab stick** (`beam-usb-lab.img`). Its `beam.conf` already has
@@ -56,6 +60,9 @@ add a `BRAIN_KEY` to its `beam.conf`.
 The brain connects to only one robot at a time: the lab robot (`wss://beam-lab.<your-tailnet>.ts.net/ws`)
 or the dev simulator (`ws://127.0.0.1:8080/ws`). Keep a copy of each setting, for example
 `/etc/beam-brain.env.sim`, to switch quickly.
+
+Only one brain at a time: if a second one connects to the robot with the same key, the robot drops the first,
+which then stays off (it logs "standing down") until it is restarted, rather than taking its place back.
 
 ## Try it without the robot
 

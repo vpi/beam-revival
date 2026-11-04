@@ -205,3 +205,42 @@ async def test_brain_disconnect_stops_its_driving(rig):
     await brain.close()
     await asyncio.sleep(0.1)
     assert ctrl.drive.owner is None and ctrl.drive.target_linear == 0.0
+
+
+async def test_rear_camera_reaches_the_brain_only_while_it_asks(rig):
+    _, ctrl, client = rig
+    panel = await client.ws_connect("/ws?role=panel")
+    brain = await client.ws_connect(f"/ws?role=brain&key={KEY}")
+    frame = json.dumps({"type": "frame", "cam": "rear", "w": 640, "h": 480, "jpeg": "AAAA"})
+
+    await panel.send_str(frame)                         # nobody asked: dropped
+    with pytest.raises(asyncio.TimeoutError):
+        await next_of(brain, "frame", timeout=0.4)
+
+    await brain.send_json({"type": "rear_feed", "on": True})
+    assert (await next_of(panel, "rear_feed"))["on"] is True
+    await panel.send_str(frame)
+    assert (await next_of(brain, "frame"))["cam"] == "rear"
+
+    ctrl.go_to_sleep("test")                            # asleep: nothing from the cameras
+    await panel.send_str(frame)
+    with pytest.raises(asyncio.TimeoutError):
+        await next_of(brain, "frame", timeout=0.4)
+    ctrl.wake_up("test")
+
+    await brain.close()                                 # the brain going away switches it off
+    assert (await next_of(panel, "rear_feed"))["on"] is False
+    await panel.close()
+
+
+async def test_the_map_reaches_drivers_also_ones_who_join_later(rig):
+    _, _, client = rig
+    brain = await client.ws_connect(f"/ws?role=brain&key={KEY}")
+    early = await client.ws_connect("/ws")
+    await asyncio.sleep(0.1)
+    await brain.send_json({"type": "map", "png": "iVBO", "width": 10})
+    assert (await next_of(early, "map"))["png"] == "iVBO"
+    late = await client.ws_connect("/ws")
+    assert (await next_of(late, "map"))["width"] == 10
+    for ws in (early, late, brain):
+        await ws.close()

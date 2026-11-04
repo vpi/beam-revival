@@ -62,9 +62,22 @@ apart from the packages in step 1 and the files in `/var/tmp`.
    sudo dd if=/var/tmp/beam-usb-stable.img of=/dev/sdX bs=4M status=progress conv=fsync
    ```
 
+**The lab stick** (experimental: brain, face recognition, see [docs/brain.md](brain.md)) is built the same way
+with a brain key, a shared secret the robot and the brain host both know. It must be 16 to 128 letters, digits,
+`-` or `_`. Make one once on the brain host and keep it in `~/beam-brain/brain.key`:
+```bash
+mkdir -p ~/beam-brain && openssl rand -hex 24 > ~/beam-brain/brain.key && chmod 600 ~/beam-brain/brain.key
+```
+Then, with that key copied to the build machine if it's a different one:
+```bash
+sudo image/build-image.sh --variant lab --brain-key "$(cat ~/beam-brain/brain.key)" --ssh-key ~/.ssh/id_ed25519.pub
+```
+The result is `/var/tmp/beam-usb-lab.img` (and `.img.xz`), with `ROBOT_NAME=beam-lab` and the `BRAIN_KEY` already in its `beam.conf`.
+
 To update an image you already built with newer code, `sudo image/update-image.sh /var/tmp/beam-usb-stable.img`
 takes seconds instead of a full rebuild. To try an image without a robot, `sudo image/test-boot.sh bios`
-boots it in QEMU (needs the `qemu-system-x86` and `ovmf` packages).
+boots it in QEMU. That needs the `qemu-system-x86` and `ovmf` packages, **KVM** (`/dev/kvm`; inside a VM
+that means nested virtualization turned on), and `netpbm` for `image/test-boot.sh screenshot`.
 
 ## 1. Write the image
 
@@ -80,11 +93,14 @@ There are two images. Use a separate stick for each:
 1. Unpack the `.img.xz` to `.img` (6.4 GB) with 7-Zip, or `xz -dk <file>.img.xz`.
 2. **Rufus** (recommended): pick the stick under *Device*, click *SELECT* and choose the `.img`,
    then *START*. Use a USB port on the back of the PC.
-3. Check it, in PowerShell **as Administrator** (read-only, about 2 minutes). The disk number comes from Disk Management or Rufus:
-   ```bash
+3. Check it, in PowerShell **as Administrator** (read-only, about 2 minutes). This needs a copy of this
+   repository on the Windows PC, with the unpacked `.img` placed in its top folder (next to `scripts`): that's
+   where the script looks for `beam-usb-stable.img`. In that folder, run (the disk number comes from Disk Management or Rufus):
+   ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\verify-stick.ps1 -DiskNumber <n>
    ```
-   For the lab stick, add `-Image beam-usb-lab.img`.
+   For the lab stick, add `-Image beam-usb-lab.img` (a path, so it's found from the folder you run it in;
+   a full path to the `.img` works from anywhere).
    It should end with "The stick matches the image".
 
 **Avoid balenaEtcher on Windows.** It failed verification on a good stick, and the stick it
@@ -99,12 +115,12 @@ Unplug and replug the stick. Windows shows a drive called **BEAMCONFIG**. Open `
 | `WIFI_SSID`, `WIFI_PASSWORD` | Your Wi-Fi. Required. Prefer 5 GHz: on a busy 2.4 GHz network the video gets blurry. |
 | `TAILSCALE_AUTHKEY` | Optional. Create one at login.tailscale.com → Settings → **Keys** → *Generate auth key* (one-off, pre-approved). Without it, the robot screen shows a login link to open on your phone instead. |
 | `ROBOT_NAME` | Its name on your tailnet. The default `beam` gives `https://beam.<your-tailnet>.ts.net/`. |
-| `MAX_SPEED` | Top speed in m/s (0.6 by default; the board's limit is 1.0). Start low: 0.3 suits a small home. |
-| `ACCESS_TOKEN` | Optional extra lock on top of Tailscale. |
+| `MAX_SPEED` | Top speed in m/s (0.6 by default; the board's limit is 1.0). Start low: 0.3 suits a small home. Write it with a dot, like `0.3`: anything the robot doesn't understand (`0,3`, a typo) means 0.3, and the robot screen says *MAX_SPEED not understood*. |
+| `ACCESS_TOKEN` | Optional extra lock on top of Tailscale: pages then need `?token=<ACCESS_TOKEN>` in the URL. 8 to 128 letters, digits, `-` or `_` (make one with `openssl rand -hex 16`). Anything else is refused with a message on the robot screen, and then **nobody can drive** (the robot locks itself with a random token) until you fix it. |
 | `LAN_ACCESS` | `yes` also serves plain `http://<robot-ip>:8080` at home (no Talk there). |
 | `TIMEZONE` | Your time zone, like `America/Vancouver` or `Europe/Berlin`. Empty means UTC. Used by `SLEEP_HOURS`. |
 | `SLEEP_HOURS` | Optional nightly sleep, like `23:00-07:00`: cameras, microphone, screen, the floor-camera lights and driving off. The robot-screen app is stopped and the display powered down; the lights beside the floor camera share the display's power. The charging light stays green. It wakes by itself at the end, or any time from the driving page (**Wake up**). It never falls asleep while someone is driving. The driving page also has a **Put to sleep** button. |
-| `SSH_KEY` | Public keys allowed to SSH in as `beam` (one `SSH_KEY=` line each). Filled in with the key you gave `build-image.sh --ssh-key`. Without any key, SSH logins are impossible: there are no passwords. |
+| `SSH_KEY` | Public keys allowed to SSH in as `beam` (one `SSH_KEY=` line each). Filled in with the key you gave `build-image.sh --ssh-key`. The robot's list is rewritten from these lines on every boot, so deleting a line (even the last one) revokes that key, and keys added on the robot by hand are removed. Without any key, SSH logins are impossible: there are no passwords. |
 
 On boot, the robot moves the Wi-Fi password and Tailscale key into its system and replaces
 them in the file with `(saved on robot)`. To change Wi-Fi later, edit the file again. To move to
@@ -163,6 +179,23 @@ Use `ssh beam@beam.<your-tailnet>.ts.net`. Password logins are off; keys come fr
 - Software lives in `/opt/beam-revival`. After updating it: `sudo systemctl restart beam-server`
 - Rebuild or refresh the image on a Linux machine: `sudo image/build-image.sh`, or the
   quicker `sudo image/update-image.sh` for code-only changes. Test it in QEMU with `image/test-boot.sh bios|uefi`.
+
+## Shutting down
+
+`sudo poweroff` switches the whole robot off. As the motor server stops, it stops the wheels and sends the
+base its "off in 20 s" order, which replaces the "power-cycle in 300 s" order it kept refreshing
+(`docs/motor-protocol.md`, section 6). Linux finishes shutting down within those 20 s, then the base cuts the
+power. Change the delay with `--power-off-delay` (0 = don't send it).
+
+Only a real power-off does this. `sudo reboot`, a crash, or restarting the `beam-server` service leaves the
+power-cycle armed on purpose: if nothing takes over, the base restarts the robot within about 5 minutes.
+If the server has no link to the base while shutting down, it can't send the order either, and the robot
+starts again the same way (the journal says so).
+
+**[tested on our Beam+]** After `sudo poweroff` the screen goes dark and only the light above the power button
+was left on; the robot then stayed off (well past the 5 minutes). Linux had finished about 3 s after the
+server stopped, well inside the 20 s. On the dock the charging light stays on while it's off. **The power button
+turns it back on.**
 
 ## Troubleshooting
 
