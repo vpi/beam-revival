@@ -42,6 +42,7 @@ async def test_reading_a_sensor(monkeypatch):
     sensor.start()
     try:
         for _ in range(40):
+            os.write(master, frame(900))                   # it talks all the time: that's how it's recognised
             await asyncio.sleep(0.05)
             if sensor.snapshot() is not None:
                 break
@@ -67,16 +68,17 @@ async def test_unplugged_after_it_was_seen_is_lost(monkeypatch):
     master, slave = os.openpty()
     path = os.ttyname(slave)
     sensor = RangeSensor()
-    monkeypatch.setattr(sensor, "_find", lambda: path)        # found "automatically"
+    monkeypatch.setattr(sensor, "_candidates", lambda: [path])  # found "automatically"
     assert not sensor.lost                                     # not seen yet: nothing to miss
     sensor.start()
     try:
         for _ in range(40):
+            os.write(master, frame(900))
             await asyncio.sleep(0.05)
             if sensor.present:
                 break
         assert sensor.present and not sensor.lost
-        monkeypatch.setattr(sensor, "_find", lambda: None)    # gone from /dev
+        monkeypatch.setattr(sensor, "_candidates", lambda: [])  # gone from /dev
         os.close(slave)
         os.close(master)                                       # unplugged: its port reports an error
         for _ in range(40):
@@ -96,3 +98,47 @@ async def test_no_sensor_no_reading(monkeypatch):
     assert sensor.snapshot() is None
     assert not sensor.lost
     await sensor.stop()
+
+
+async def test_a_port_without_its_frames_is_left_alone(monkeypatch):
+    """A robot arm on the same chip (talking, but not in distance frames) isn't taken for the sensor."""
+    monkeypatch.setattr(rangefinder, "RETRY_S", 0.05)
+    monkeypatch.setattr(rangefinder, "IDENTIFY_S", 0.3)
+    arm_m, arm_s = os.openpty()
+    rng_m, rng_s = os.openpty()
+    arm, real = os.ttyname(arm_s), os.ttyname(rng_s)
+    sensor = RangeSensor()
+    monkeypatch.setattr(sensor, "_candidates",
+                        lambda: [p for p in (arm, real) if p not in sensor.picker.rejected])
+    sensor.start()
+    try:
+        for _ in range(60):
+            os.write(arm_m, b'{"T":1051,"x":235.1,"y":0,"z":234}\n')
+            os.write(rng_m, frame(1500))
+            await asyncio.sleep(0.05)
+            if sensor.present:
+                break
+        assert sensor.present and sensor.port.path == real and arm in sensor.picker.rejected
+        assert sensor.snapshot()["m"] == 1.5
+    finally:
+        await sensor.stop()
+        for fd in (arm_m, arm_s, rng_m, rng_s):
+            os.close(fd)
+
+
+def test_a_turned_down_port_is_tried_again_later(monkeypatch, tmp_path):
+    """In case it was the sensor still starting up; and at once if it was unplugged and plugged back."""
+    from beamctl import serialport
+    a = tmp_path / "usb-Silicon_Labs_CP2102_USB_to_UART_a"
+    a.touch()
+    picker = serialport.PortPicker("auto", str(tmp_path / "usb-Silicon_Labs_CP2102_USB_to_UART*"))
+    assert picker.candidates() == [str(a)]
+    picker.reject(str(a))
+    assert picker.candidates() == []
+    picker.rejected[str(a)] -= picker.REJECT_S
+    assert picker.candidates() == [str(a)]
+    picker.reject(str(a))
+    a.unlink()                                                 # unplugged: forgotten
+    assert picker.candidates() == [] and not picker.rejected
+    a.touch()                                                  # plugged back: tried at once
+    assert picker.candidates() == [str(a)]

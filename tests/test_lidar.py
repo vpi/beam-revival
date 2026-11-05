@@ -4,7 +4,7 @@ import asyncio
 import os
 
 from beamctl import lidar
-from beamctl.lidar import DESCRIPTOR, START, STOP, Lidar, ScanParser, masked, parse_mask
+from beamctl.lidar import DESCRIPTOR, GET_INFO, INFO, START, STOP, Lidar, ScanParser, masked, parse_mask
 
 
 def node(angle: float, metres: float, new_turn: bool = False, quality: int = 40) -> bytes:
@@ -70,6 +70,8 @@ async def test_spins_while_awake_only():
     assert lid.snapshot() is None
     lid.start()
     try:
+        assert await wait_for(lambda: GET_INFO in read_sent())
+        os.write(master, INFO + bytes([0x41, 1, 1, 18]) + bytes(16))     # "I'm a lidar"
         assert await wait_for(lambda: START in read_sent())
         os.write(master, DESCRIPTOR + turn(lambda a: 0.07 if 135 <= a < 210 else 1.2) + turn())
         assert await wait_for(lambda: lid.snapshot()["fresh"])
@@ -116,3 +118,52 @@ def test_a_mask_it_cannot_read_is_ignored_not_fatal():
     for bad in ("-30-30", "135–210", "135", "front"):
         assert Lidar(device=None, mask=bad).mask is None
     assert Lidar(device=None, mask="135-210").mask == (135.0, 210.0)
+
+
+async def test_a_port_that_does_not_answer_like_a_lidar_is_left_alone(monkeypatch):
+    """A robot arm (or any other gadget) on the same USB serial chip isn't taken for the lidar."""
+    monkeypatch.setattr(lidar, "IDENTIFY_S", 0.3)
+    arm_m, arm_s = os.openpty()
+    lid_m, lid_s = os.openpty()
+    for fd in (arm_m, lid_m):
+        os.set_blocking(fd, False)
+    arm, real = os.ttyname(arm_s), os.ttyname(lid_s)
+    lid = Lidar()
+    monkeypatch.setattr(lid.picker, "candidates", lambda: [p for p in (arm, real) if p not in lid.picker.rejected])
+    got = bytearray()
+
+    def answer():                                   # the real lidar answers its info request
+        try:
+            got.extend(os.read(lid_m, 4096))
+        except BlockingIOError:
+            pass
+        if GET_INFO in got:
+            os.write(lid_m, INFO + bytes([0x41, 1, 1, 18]) + bytes(16))
+            got.clear()
+        return lid.present
+
+    lid.start()
+    try:
+        assert await wait_for(answer)
+        assert lid.port.path == real and arm in lid.picker.rejected
+        os.write(arm_m, b'{"T":1051,"x":235}\n')    # the arm talking is never read as scans
+        assert lid.port.path == real
+    finally:
+        await lid.stop()
+        for fd in (arm_m, arm_s, lid_m, lid_s):
+            os.close(fd)
+
+
+async def test_a_named_port_must_answer_too(monkeypatch):
+    """Named in beam.conf but something else is on it: it's not used, and counts as a lost lidar."""
+    monkeypatch.setattr(lidar, "IDENTIFY_S", 0.2)
+    master, slave = os.openpty()
+    lid = Lidar(os.ttyname(slave))
+    lid.start()
+    try:
+        assert await wait_for(lambda: os.ttyname(slave) in lid.picker.rejected)
+        assert not lid.present and lid.lost
+    finally:
+        await lid.stop()
+        os.close(master)
+        os.close(slave)

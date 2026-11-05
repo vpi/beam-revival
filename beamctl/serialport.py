@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import errno
 import fcntl
+import glob
 import os
 import termios
+import time
 from typing import Callable
 
 
@@ -97,3 +99,29 @@ class SerialPort:
         if self._loop is not None:
             self._loop.remove_reader(fd)
         os.close(fd)
+
+
+class PortPicker:
+    """Which serial ports a sensor should try: the one named, or every match of its adapter's name.
+
+    A port is only used once what answers on it is the sensor (each sensor checks that itself): other gadgets,
+    like a robot arm, use the same USB serial chips. One that didn't answer is left alone for REJECT_S, so it
+    isn't opened every few seconds (opening a port can reset what's behind it), then tried again, in case it
+    was the sensor still starting up.
+    """
+
+    REJECT_S = 60.0
+
+    def __init__(self, device: str, pattern: str):
+        self.device = device                   # a port path, or "auto"
+        self.pattern = pattern
+        self.rejected: dict[str, float] = {}
+
+    def candidates(self) -> list[str]:
+        now = time.monotonic()
+        self.rejected = {p: t for p, t in self.rejected.items() if now - t < self.REJECT_S and os.path.exists(p)}
+        found = [self.device] if self.device != "auto" else sorted(glob.glob(self.pattern))
+        return [p for p in found if p not in self.rejected]
+
+    def reject(self, path: str) -> None:
+        self.rejected[path] = time.monotonic()

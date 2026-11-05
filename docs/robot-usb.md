@@ -120,6 +120,7 @@ Unplug and replug the stick. Windows shows a drive called **BEAMCONFIG**. Open `
 | `LAN_ACCESS` | `yes` also serves plain `http://<robot-ip>:8080` at home (no Talk there). |
 | `TIMEZONE` | Your time zone, like `America/Vancouver` or `Europe/Berlin`. Empty means UTC. Used by `SLEEP_HOURS`. |
 | `SLEEP_HOURS` | Optional nightly sleep, like `23:00-07:00`: cameras, microphone, screen, the floor-camera lights and driving off. The robot-screen app is stopped and the display powered down; the lights beside the floor camera share the display's power. The charging light stays green. It wakes by itself at the end, or any time from the driving page (**Wake up**). It never falls asleep while someone is driving. The driving page also has a **Put to sleep** button. |
+| `LIDAR_DEVICE`, `RANGE_DEVICE` | Optional. Which USB port is the lidar / the ultrasonic sensor: empty means the robot finds them, `none` means not fitted. Pin them when something else (a robot arm) uses the same USB serial chip: see [sensors.md](sensors.md#which-port). |
 | `SSH_KEY` | Public keys allowed to SSH in as `beam` (one `SSH_KEY=` line each). Filled in with the key you gave `build-image.sh --ssh-key`. The robot's list is rewritten from these lines on every boot, so deleting a line (even the last one) revokes that key, and keys added on the robot by hand are removed. Without any key, SSH logins are impossible: there are no passwords. |
 
 On boot, the robot moves the Wi-Fi password and Tailscale key into its system and replaces
@@ -191,6 +192,11 @@ Only a real power-off does this. `sudo reboot`, a crash, or restarting the `beam
 power-cycle armed on purpose: if nothing takes over, the base restarts the robot within about 5 minutes.
 If the server has no link to the base while shutting down, it can't send the order either, and the robot
 starts again the same way (the journal says so).
+
+Pressing the power button while the robot runs does the same as `sudo poweroff`. If it was asleep, it starts
+awake the next time: only the power button can start it after a real power-off, so someone is there. At night
+it then stays awake until the next night, as if woken from the driving page. A reboot, crash or update keeps
+it asleep.
 
 **[tested on our Beam+]** After `sudo poweroff` the screen goes dark and only the light above the power button
 was left on; the robot then stayed off (well past the 5 minutes). Linux had finished about 3 s after the

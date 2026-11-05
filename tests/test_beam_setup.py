@@ -239,3 +239,22 @@ def test_the_robot_screen_reads_its_url_after_the_server_is_up():
     kiosk = (SCRIPT.parents[1] / "bin" / "beam-kiosk").read_text()
     wait = kiosk.index("status -o /dev/null && break")
     assert kiosk.index("> \"$START_PAGE\"") > wait and kiosk.rindex("URL=$(cat /etc/beam/kiosk-url") > wait
+
+
+def test_sensor_ports(bs):
+    assert bs.serial_device({}, "LIDAR_DEVICE") == ("auto", None)
+    assert bs.serial_device({"LIDAR_DEVICE": " Auto "}, "LIDAR_DEVICE") == ("auto", None)
+    assert bs.serial_device({"RANGE_DEVICE": "none"}, "RANGE_DEVICE") == ("none", None)
+    name = "usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_0123abcd-if00-port0"
+    assert bs.serial_device({"LIDAR_DEVICE": name}, "LIDAR_DEVICE") == ("/dev/serial/by-id/" + name, None)
+    assert bs.serial_device({"LIDAR_DEVICE": "/dev/ttyUSB1"}, "LIDAR_DEVICE") == ("/dev/ttyUSB1", None)
+    for bad in ("/dev/tty USB1", "/etc/passwd", "/dev/../etc/shadow", "x; rm -rf /", "$(id)"):
+        device, problem = bs.serial_device({"LIDAR_DEVICE": bad}, "LIDAR_DEVICE")
+        assert device == "auto" and "LIDAR_DEVICE not understood" in problem, bad   # never "none"
+
+
+def test_sensor_ports_reach_the_server(bs, tmp_path, monkeypatch):
+    config_rig(bs, tmp_path, monkeypatch, "WIFI_SSID=home\nLIDAR_DEVICE=usb-lidar-if00\nRANGE_DEVICE=none\n")
+    bs.cmd_config()
+    args = next(l for l in bs.SERVER_ENV.read_text().splitlines() if l.startswith("BEAM_ARGS="))
+    assert args.endswith(" --lidar-device /dev/serial/by-id/usb-lidar-if00 --range-device none")

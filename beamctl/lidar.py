@@ -5,6 +5,8 @@ answers with a 7-byte descriptor (A5 5A 05 00 00 40 81), then 5 bytes per measur
   byte 0: bit 0 = first point of a new turn, bit 1 = its inverse, bits 2-7 = signal quality
   byte 1: bit 0 = always 1, bits 1-7 = angle (1/64 degree, low 7 bits); byte 2 = the angle's next 8 bits
   bytes 3-4: distance in 1/4 mm (0 = no echo)
+Before a port is used, "A5 50" (device info) must get the lidar's answer: other things, like a robot arm, use
+the same USB serial chip.
 Angles go clockwise seen from above, 0 = the arrow on the lidar's top. It's mounted with that arrow to the
 robot's front, so 0 is straight ahead; the mast right behind it hides a slice, which is left out.
 
@@ -14,12 +16,11 @@ The lidar spins only while the robot is awake, and nothing is ever stored: the l
 from __future__ import annotations
 
 import asyncio
-import glob
 import logging
 import time
 from typing import Callable
 
-from .serialport import SerialPort
+from .serialport import PortPicker, SerialPort
 
 log = logging.getLogger("beam.lidar")
 
@@ -27,6 +28,9 @@ AUTO = "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART*"
 BAUD = 460800
 START, STOP = bytes([0xA5, 0x20]), bytes([0xA5, 0x25])
 DESCRIPTOR = bytes([0xA5, 0x5A, 0x05, 0x00, 0x00, 0x40, 0x81])
+GET_INFO = bytes([0xA5, 0x50])
+INFO = bytes([0xA5, 0x5A, 0x14, 0x00, 0x00, 0x00, 0x04])   # then model, firmware minor, major, hardware, serial (16)
+IDENTIFY_S = 1.0               # how long a port has to answer like a lidar
 MIN_M, MAX_M = 0.05, 12.0      # what the C1 measures
 BIN_DEG = 2                    # the driving page gets the nearest hit per 2 degrees
 STALE_S = 1.0                  # no complete turn for this long: restart the scan
@@ -89,7 +93,8 @@ class ScanParser:
 class Lidar:
     def __init__(self, device: str = "auto", mask: str | None = None, rotation: float = 0.0,
                  should_spin: Callable[[], bool] = lambda: True):
-        self.device = device                   # a serial port path, or "auto" (the first CP2102N)
+        self.device = device                   # a serial port path, or "auto" (a CP2102N that answers as a lidar)
+        self.picker = PortPicker(device or "auto", AUTO)
         try:
             self.mask = parse_mask(mask)
         except ValueError:
@@ -108,6 +113,8 @@ class Lidar:
         self._turn_times: list[float] = []
         self._started_at = 0.0
         self._last_error: str | None = None
+        self._probing: bytearray | None = None  # what came back while checking a port is a lidar
+        self._told: set[str] = set()           # ports already reported as not a lidar
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -121,11 +128,49 @@ class Lidar:
             self._send(STOP)
             self.port.close()
 
-    def _find(self) -> str | None:
-        if self.device != "auto":
-            return self.device
-        found = sorted(glob.glob(AUTO))
-        return found[0] if found else None
+    def _candidates(self) -> list[str]:
+        return self.picker.candidates()
+
+    async def _identify(self, path: str) -> SerialPort | None:
+        """The port open, if a lidar answers on it; else None, and the port is left alone for a while."""
+        port = SerialPort(path, self._on_data, self._on_lost, baud=BAUD)
+        try:
+            port.open()
+        except OSError as e:
+            if str(e) != self._last_error:              # once, not every retry
+                log.warning("cannot open lidar %s: %s", path, e)
+            self._last_error = str(e)
+            return None
+        self._probing = bytearray()
+        answer = None
+        try:
+            port.write(STOP)                            # in case it's still scanning
+            await asyncio.sleep(0.1)
+            port.flush_input()
+            self._probing.clear()
+            port.write(GET_INFO)
+            deadline = time.monotonic() + IDENTIFY_S
+            while time.monotonic() < deadline and port.is_open:
+                i = self._probing.find(INFO)
+                if i >= 0 and len(self._probing) >= i + len(INFO) + 4:
+                    answer = bytes(self._probing[i + len(INFO):i + len(INFO) + 4])
+                    break
+                await asyncio.sleep(0.05)
+        except OSError:
+            pass
+        finally:
+            self._probing = None
+        if answer is None:
+            port.close()
+            self.picker.reject(path)
+            if path not in self._told:
+                log.warning("%s doesn't answer like a lidar; leaving it alone", path)
+                self._told.add(path)
+            return None
+        self._told.discard(path)
+        model, minor, major, hw = answer
+        log.info("lidar at %s (model %02X, firmware %d.%02d, hardware %d)", path, model, major, minor, hw)
+        return port
 
     def _send(self, data: bytes) -> None:
         try:
@@ -151,18 +196,11 @@ class Lidar:
         while True:
             if self.port is None or not self.port.is_open:
                 self.spinning = False
-                path = self._find()
-                if path is not None:
-                    self.port = SerialPort(path, self._on_data, self._on_lost, baud=BAUD)
-                    try:
-                        self.port.open()
-                        log.info("lidar at %s", path)
-                        self.expected = True
-                    except OSError as e:
-                        if str(e) != self._last_error:          # once, not every retry
-                            log.warning("cannot open lidar %s: %s", path, e)
-                        self._last_error = str(e)
-                        self.port = None
+                for path in self._candidates():
+                    port = await self._identify(path)
+                    if port is not None:
+                        self.port, self.expected = port, True
+                        break
             if self.port is not None and self.port.is_open:
                 now = time.monotonic()
                 if self.should_spin() and not self.spinning:
@@ -177,6 +215,9 @@ class Lidar:
             await asyncio.sleep(0.5 if self.port is not None else RETRY_S)
 
     def _on_data(self, data: bytes) -> None:
+        if self._probing is not None:
+            self._probing += data
+            return
         if not self.spinning:
             return
         for turn in self.parser.feed(data):
@@ -191,6 +232,8 @@ class Lidar:
             self._turn_times = [t for t in self._turn_times if now - t < 2.0] + [now]
 
     def _on_lost(self, exc: Exception) -> None:
+        if self._probing is not None:
+            return                                      # it was only being checked
         log.warning("lidar gone: %s", exc)
         self.spinning, self.points = False, []
 

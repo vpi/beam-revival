@@ -355,6 +355,7 @@ class MotorController:
                     await asyncio.sleep(self.cfg.command_interval_s)
                 if sent:
                     log.info("powering off: the base switches off in %d s", self.cfg.power_off_delay_s)
+                    self.sleep.awake_next_start()
                 else:
                     log.warning("powering off, but the base didn't take the off order: it may restart the robot")
             self._port.close()

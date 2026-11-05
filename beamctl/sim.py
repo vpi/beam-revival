@@ -238,12 +238,21 @@ class SimulatedBoard:
         lim_lin = _clamp(self.cmd_linear, BEAMPLUS_LINEAR_LIMIT)
         lim_ang = _clamp(self.cmd_angular, BEAMPLUS_ANGULAR_LIMIT)
         frac = self.capacity / self.capacity_max
+        # The Beam+ has a 12 V battery: our board reads 13.7 V on the charger when full, drawing about
+        # 0.14 A from it. Off the charger, a 12 V lead-acid battery's usual 11.8 V empty to 12.8 V full
+        # (not measured on ours yet). Charging current and the charger's own voltage are guesses too.
+        full = frac >= 0.999
+        charge = 0.0 if full else 1.5
+        if self.docked:
+            volts = 13.7 if full else 13.2 + 0.5 * frac
+        else:
+            volts = 11.8 + 1.0 * frac - abs(self.linear) * 0.3
         return p.Status(
             flags=flags,
-            battery_voltage=22.0 + 3.2 * frac,
-            battery_current=(2.0 if self.docked else -0.4 - abs(self.linear) * 1.5),
-            charge_voltage=29.0 if self.docked else 0.0,
-            charge_current=2.0 if self.docked else 0.0,
+            battery_voltage=volts,
+            battery_current=(charge - 0.14 if self.docked else -0.4 - abs(self.linear) * 1.5),
+            charge_voltage=14.4 if self.docked else 0.0,
+            charge_current=charge if self.docked else 0.0,
             capacity=self.capacity, capacity_max=self.capacity_max,
             timestamp_us=int(self.now() * 1e6) & 0xFFFFFFFF,
             encoder_l=int(self.enc_l), encoder_r=int(self.enc_r),

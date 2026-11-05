@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from beamctl import protocol as p
 from beamctl.server import Config, DriveState, MotorController, build_app, same_secret
 from beamctl.signaling import MediaHub
+from beamctl.sleep import SleepManager
 from beamctl.sim import SimulatedBoard
 
 KEY = "brain-secret"
@@ -235,6 +236,17 @@ async def test_a_restart_or_reboot_leaves_the_power_cycle_armed(monkeypatch):
         c, sent = _stopping_controller(powering_off, monkeypatch, delay)
         await c.stop()
         assert sent == [p.velocity(0.0, 0.0, 0)] * 3
+
+
+async def test_switched_off_asleep_it_starts_awake_but_a_restart_keeps_it_asleep(monkeypatch, tmp_path):
+    """Pressing the power button while it's asleep switches it off; pressing it again must not bring it
+    back asleep. A restart, reboot or crash at night must not wake it."""
+    for powering_off, after in ((True, False), (False, True)):
+        c, sent = _stopping_controller(powering_off, monkeypatch)
+        c.sleep = SleepManager(None, state_file=str(tmp_path / f"sleep-{powering_off}.json"))
+        c.sleep.sleep("someone")
+        await c.stop()
+        assert SleepManager(None, state_file=str(tmp_path / f"sleep-{powering_off}.json")).asleep is after
 
 
 def test_only_poweroff_and_halt_count_as_powering_off(monkeypatch):

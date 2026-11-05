@@ -31,12 +31,16 @@ A waterproof ultrasonic sensor that measures 3 to 450 cm. It connects through a 
 The CP2102's TXD and 3V3 stay unconnected. If you use a Grove breakout board in between, go by the wire
 colours, not the board's labels: the sensor's plug doesn't follow the Grove pin order.
 
-The robot server (`beamctl/rangefinder.py`) finds the adapter by its name
+The robot server (`beamctl/rangefinder.py`) looks for the adapter by its name
 (`/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART...`), so it can be plugged in or out at any time, and
-the driving page's Robot card shows the distance while it's there. `--range-device PATH` names another port;
-`--range-device none` turns it off. It also feeds the obstacle stop (below).
+the driving page's Robot card shows the distance while it's there. It also feeds the obstacle stop (below).
 
 The adapter is a plain CP2102, not a CP2102N: the RPLIDAR C1's adapter is a CP2102N and is left alone.
+
+A name isn't proof: other things (a robot arm, say) use the same chips. So a port is used only once the
+sensor's frames come from it; one that doesn't send them is logged ("doesn't send distance frames") and left
+alone for a minute, then tried again. `RANGE_DEVICE` in beam.conf pins the port (see [Which port](#which-port)),
+or `none` turns it off.
 
 A reading under 3 cm (inside the sensor's blind zone) counts as something touching the front, not as a clear
 way; 0 is the sensor's "no echo". We haven't yet checked on hardware what it reports that close: if it turns
@@ -55,8 +59,10 @@ Mount it on top of the base, just in front of the mast, level, with the **arrow 
 robot's front** (its cable then runs back towards the mast). It sees everything taller than its own height;
 the ultrasonic sensor covers what's lower.
 
-The robot server (`beamctl/lidar.py`) finds it by its adapter's name, spins it while the robot is awake and
-stops it in sleep mode. The driving page then has a **Surroundings** card: a top view, front up, with the
+The robot server (`beamctl/lidar.py`) looks for it by its adapter's name, and uses a port only once it answers
+the lidar's device-info request (the log then says "lidar at ... (model ..., firmware ...)"); anything else is
+logged ("doesn't answer like a lidar") and left alone for a minute. It spins the lidar while the robot is awake
+and stops it in sleep mode. The driving page then has a **Surroundings** card: a top view, front up, with the
 lidar's hits, the slice the mast hides, and the ultrasonic sensor's reading as an arc in front. Nothing is
 recorded; only the latest turn is kept.
 
@@ -66,7 +72,7 @@ which the server leaves out. Settings, if yours differs:
 
 | Option | Default | |
 |---|---|---|
-| `--lidar-device` | `auto` | a serial port path, or `none` to turn it off |
+| `--lidar-device` | `auto` | a serial port path, or `none` to turn it off (`LIDAR_DEVICE` in beam.conf) |
 | `--lidar-mask` | `135-210` | degrees to leave out; `''` for none (one it can't read is logged and ignored) |
 | `--lidar-rotation` | `0` | degrees to add if the arrow doesn't point to the front |
 
@@ -91,3 +97,20 @@ is for that driver only, with a warning banner while it lasts, and it's on again
 Tried on our Beam+ on the floor: driving at 0.08 m/s towards a box, it began slowing at 0.8 m and came to a
 stop about 0.26 m before the box, then backed away normally. On blocks the wheels whirr even when it's told
 to stand still (the board steering by its gyro, see docs/motor-protocol.md), so judge it on the floor.
+
+## Which port
+
+With only the sensors plugged in, `auto` is fine. If something else on the robot uses a Silicon Labs USB
+serial chip (a robot arm, another sensor), pin each sensor to its own adapter in beam.conf, so the robot never
+even opens the other one (opening a port can reset what's behind it). On the robot, `ls /dev/serial/by-id/`
+lists the adapters; the names include each adapter's serial number, so they stay the same whichever USB socket
+it's in:
+
+```
+LIDAR_DEVICE=usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_<serial>-if00-port0
+RANGE_DEVICE=usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_<serial>-if00-port0
+```
+
+A pinned port is still checked: if what answers isn't the sensor, it isn't used, and the obstacle stop treats
+the sensor as lost (driving forward is slowed to a crawl) until it's fixed. A value the robot doesn't
+understand means `auto`, never `none`, and the robot screen says so.

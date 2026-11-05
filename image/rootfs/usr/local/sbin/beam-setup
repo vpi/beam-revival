@@ -163,6 +163,25 @@ def max_speed(conf: dict[str, str]) -> tuple[float, str | None]:
     return min(1.0, max(0.1, float(raw))), None
 
 
+def serial_device(conf: dict[str, str], key: str) -> tuple[str, str | None]:
+    """A sensor's port from LIDAR_DEVICE / RANGE_DEVICE: "auto", "none" or a port, and a message if not understood.
+
+    Empty means auto. A port is a /dev path, or a name from /dev/serial/by-id/ (which has the adapter's serial
+    number, so it stays the same whichever USB socket it's in). Not understood means auto, never "none": the
+    server still checks what answers on each port, and a sensor quietly turned off would drop out of the
+    obstacle stop."""
+    raw = conf.get(key, "").strip()
+    if raw.lower() in ("", "auto"):
+        return "auto", None
+    if raw.lower() == "none":
+        return "none", None
+    if "/" not in raw:
+        raw = "/dev/serial/by-id/" + raw
+    if re.fullmatch(r"/dev/[A-Za-z0-9._:+-]+(/[A-Za-z0-9._:+-]+)*", raw) and ".." not in raw:
+        return raw, None
+    return "auto", f"{key} not understood (a name from /dev/serial/by-id, auto or none): finding it automatically"
+
+
 def write_private(path: Path, text: str) -> None:
     """Write a file only root can read (systemd reads EnvironmentFile= as root), never readable on the way."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -255,6 +274,12 @@ def cmd_config() -> None:
     args = f"--host {host} --max-linear {speed}"
     # Secrets go in their own variables, not BEAM_ARGS: a command line is readable by every program on the robot.
     env = {"BEAM_TOKEN": token} if token else {}
+    for key, flag in (("LIDAR_DEVICE", "--lidar-device"), ("RANGE_DEVICE", "--range-device")):
+        device, problem = serial_device(conf, key)
+        if problem:
+            messages.append(problem)
+        if device != "auto":
+            args += f" {flag} {device}"
     sleep_hours = conf.get("SLEEP_HOURS", "").replace(" ", "")
     if sleep_hours:
         if re.fullmatch(r"\d{1,2}:\d{2}-\d{1,2}:\d{2}", sleep_hours):

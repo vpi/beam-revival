@@ -2,17 +2,17 @@
 
 The sensor only talks: about 10 times a second, at 9600 baud, 4 bytes: 0xFF, the distance in millimetres
 (high byte, low byte) and a checksum (the low 8 bits of the first three). It's found by its adapter's name,
-plugged in or unplugged at any time, and never written to.
+plugged in or unplugged at any time, and never written to. A port is used only once good frames come from it:
+other things, like a robot arm, use the same USB serial chip.
 """
 
 from __future__ import annotations
 
 import asyncio
-import glob
 import logging
 import time
 
-from .serialport import SerialPort
+from .serialport import PortPicker, SerialPort
 
 log = logging.getLogger("beam.range")
 
@@ -24,6 +24,8 @@ BAUD = 9600
 MIN_MM, MAX_MM = 30, 4500
 STALE_S = 0.5                  # no frame for this long: the reading is no longer trusted
 RETRY_S = 2.0                  # look for the sensor this often while it isn't there
+IDENTIFY_S = 1.5               # a port must send IDENTIFY_FRAMES good frames within this to count as the sensor
+IDENTIFY_FRAMES = 2
 
 
 def parse_frames(buf: bytes) -> tuple[list[int], bytes]:
@@ -47,7 +49,8 @@ def distance_mm(v: int) -> int | None:
 
 class RangeSensor:
     def __init__(self, device: str = "auto"):
-        self.device = device                   # a serial port path, or "auto" (the first plain CP2102)
+        self.device = device                   # a serial port path, or "auto" (a plain CP2102 sending its frames)
+        self.picker = PortPicker(device or "auto", AUTO)
         self.port: SerialPort | None = None
         # A sensor named on the command line must be there; one found automatically, once it has been seen.
         # Missing after that, it's "lost" (unplugged, a USB reset): the obstacle stop can't see what it saw.
@@ -57,6 +60,7 @@ class RangeSensor:
         self.frames = 0
         self._buf = b""
         self._last_error: str | None = None
+        self._told: set[str] = set()           # ports already reported as not the sensor
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -69,28 +73,45 @@ class RangeSensor:
         if self.port is not None:
             self.port.close()
 
-    def _find(self) -> str | None:
-        if self.device != "auto":
-            return self.device
-        found = sorted(glob.glob(AUTO))
-        return found[0] if found else None
+    def _candidates(self) -> list[str]:
+        return self.picker.candidates()
+
+    async def _identify(self, path: str) -> SerialPort | None:
+        """The port open, if the sensor's frames come from it; else None, and the port is left alone a while."""
+        port = SerialPort(path, self._on_data, lambda exc: None, baud=BAUD)
+        self._buf = b""
+        try:
+            port.open()
+        except OSError as e:
+            if str(e) != self._last_error:               # once, not every retry
+                log.warning("cannot open distance sensor %s: %s", path, e)
+            self._last_error = str(e)
+            return None
+        start = self.frames
+        deadline = time.monotonic() + IDENTIFY_S
+        while time.monotonic() < deadline and port.is_open and self.frames - start < IDENTIFY_FRAMES:
+            await asyncio.sleep(0.05)
+        if self.frames - start < IDENTIFY_FRAMES or not port.is_open:
+            port.close()
+            self.mm = None
+            self.picker.reject(path)
+            if path not in self._told:
+                log.warning("%s doesn't send distance frames; leaving it alone", path)
+                self._told.add(path)
+            return None
+        self._told.discard(path)
+        port._on_lost = self._on_lost
+        log.info("distance sensor at %s", path)
+        return port
 
     async def _run(self) -> None:
         while True:
             if self.port is None or not self.port.is_open:
-                path = self._find()
-                if path is not None:
-                    self.port = SerialPort(path, self._on_data, self._on_lost, baud=BAUD)
-                    self._buf = b""
-                    try:
-                        self.port.open()
-                        log.info("distance sensor at %s", path)
-                        self.expected = True
-                    except OSError as e:
-                        if str(e) != self._last_error:       # once, not every retry
-                            log.warning("cannot open distance sensor %s: %s", path, e)
-                        self._last_error = str(e)
-                        self.port = None
+                for path in self._candidates():
+                    port = await self._identify(path)
+                    if port is not None:
+                        self.port, self.expected = port, True
+                        break
             await asyncio.sleep(RETRY_S)
 
     def _on_data(self, data: bytes) -> None:

@@ -160,6 +160,17 @@ class SleepManager:
         except OSError as e:
             log.warning("can't save the sleep state to %s: %s", self.state_file, e)
 
+    def awake_next_start(self) -> None:
+        """The robot is being switched off for real: only its power button starts it again, so whoever does
+        that is at the robot and wants it awake. Forget the sleep (but not that it's night: the schedule
+        then leaves it awake until the next night, as if woken by hand). Restarts and crashes keep it."""
+        if not self.asleep:
+            return
+        self.asleep, self.reason, self.since = False, None, time.time()
+        self._pending = False
+        log.info("switched off while asleep: it starts awake")
+        self._save()
+
     # --- sleep and wake ----------------------------------------------------------
 
     def sleep(self, reason: str) -> None:

@@ -44,7 +44,7 @@ def test_decode_command_rejects_corruption():
 def test_status_roundtrip():
     s = p.Status(
         flags=p.FLAG_MOTORS_ENABLED | p.FLAG_CHARGING | (3 << 24),
-        battery_voltage=25.2, capacity=50.0, capacity_max=100.0,
+        battery_voltage=12.6, capacity=50.0, capacity_max=100.0,
         timestamp_us=123456, encoder_l=1000, encoder_r=-1000, limiter_tag=99,
         actual_linear=0.4, actual_angular=-0.1, command_latency_ms=12, limiter_latency_ms=34,
         integrated_yaw=1 << 22,
@@ -55,7 +55,7 @@ def test_status_roundtrip():
     d = p.decode_status(pkt)
     assert d.charging and d.motors_enabled and not d.charger_detected
     assert d.fault == 3
-    assert d.battery_voltage == pytest.approx(25.2, abs=1e-4)
+    assert d.battery_voltage == pytest.approx(12.6, abs=1e-4)
     assert d.battery_percent == pytest.approx(50.0)
     assert d.limiter_tag == 99
     assert (d.command_latency_ms, d.limiter_latency_ms) == (12, 34)
@@ -88,3 +88,14 @@ def test_packet_reader_resyncs_over_garbage_and_bad_crc():
     assert len(out) == 1
     assert p.decode_status(out[0][1]).timestamp_us == 1
     assert r.crc_errors >= 1
+
+
+def test_simulator_has_a_12_volt_battery():
+    from beamctl.sim import SimulatedBoard
+    b = SimulatedBoard()
+    off = b.status()
+    assert 11.5 < off.battery_voltage < 13.0 and off.battery_current < 0 and not off.charging
+    b.docked = True
+    b.capacity = b.capacity_max
+    full = b.status()
+    assert full.battery_voltage == pytest.approx(13.7) and full.charging   # what our board reads, full on the charger

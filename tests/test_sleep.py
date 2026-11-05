@@ -207,3 +207,19 @@ async def test_going_to_sleep_stops_the_robot(rig):
     ctrl.go_to_sleep("test")
     assert await wait_for(lambda: board.cmd_linear == 0.0, timeout=1.0)
     await ws.close()
+
+
+def test_switched_off_while_asleep_starts_awake(tmp_path):
+    """Only the power button starts it after a real power-off: whoever pressed it is there and wants it awake.
+    At night it then stays awake until the next night, as if woken by hand."""
+    state = str(tmp_path / "sleep.json")
+    s = SleepManager("23:00-07:00", state_file=state)
+    s.tick(at("23:00"), busy=False)
+    assert s.asleep
+    s.awake_next_start()                                         # powering off
+    again = SleepManager("23:00-07:00", state_file=state)        # the button, later that night
+    again.tick(at("01:00"), busy=False)
+    assert not again.asleep
+    again.tick(at("07:00"), busy=False)
+    again.tick(at("23:00"), busy=False)
+    assert again.asleep                                          # the next night as usual
