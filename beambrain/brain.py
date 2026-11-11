@@ -26,7 +26,7 @@ import aiohttp
 import cv2
 import numpy as np
 
-from .ears import Wake
+from .ears import WAVE_AWAKE_S, Wake
 from .faces import FaceEngine, thumbnail_jpeg
 from .greeter import Greeter
 from .people import PeopleStore
@@ -68,6 +68,9 @@ class Brain:
         self._localizing: asyncio.Task | None = None
         self._pose_sent: tuple[dict, float] = ({}, 0.0)
         self._places = None                                                   # named places on it (places.py)
+        self.home = None                     # Home Assistant (home.py), for room presence; main() sets it
+        self.presence: dict[str, bool | None] = {}   # place id -> someone there now (its HA sensors), None: unknown
+        self._presence_poke = asyncio.Event()        # read the sensors now (a place's sensors changed)
         self.camera = None             # the robot's measured cameras (geometry.CameraModel); None = simulator's
         self.human_took_over = asyncio.Event()
         self.telemetry_listeners: list = []      # e.g. the AI driver's breadcrumb tracker
@@ -86,6 +89,7 @@ class Brain:
         self.wake_reply: asyncio.Task | None = None   # "Question?" after his name alone, unless words follow
         self.waves: WaveDetector | None = None   # beambrain/wave.py: a wave wakes him too (needs the face engine)
         self.listening = False               # the server sends the microphone (awake, nobody driving)
+        self.pending_trip: tuple[str, float] | None = None   # (place id, until): asked in the room, waiting for "yes"
         self.home_drivers: set[str] = set()  # Tailscale logins whose typed chats may control the home
         self._tasks: set[asyncio.Task] = set()   # fire-and-forget tasks, held so they aren't garbage-collected
         self.replaced = False                # another brain took our place on the robot: stand down
@@ -113,34 +117,41 @@ class Brain:
             except Exception:
                 log.exception("speech recognition unavailable; Rocky won't listen")
                 self.ears = None
-        delay = 1.0
         async with aiohttp.ClientSession() as session:
-            while not stop.is_set():
+            presence = asyncio.create_task(self.watch_presence(session))
+            try:
+                await self._connect_loop(session, url, stop)
+            finally:
+                presence.cancel()
+
+    async def _connect_loop(self, session: aiohttp.ClientSession, url: str, stop: asyncio.Event) -> None:
+        delay = 1.0
+        while not stop.is_set():
+            try:
+                async with session.ws_connect(url, heartbeat=10, max_msg_size=8 * 2**20) as ws:
+                    log.info("connected to robot")
+                    delay = 1.0
+                    await self.serve(ws, stop)
+                if ws.close_code == REPLACED_CLOSE_CODE:
+                    # Another brain connected with the same key and the server dropped us for it. Coming
+                    # back would only knock that one off in turn, over and over, so stay off (like the
+                    # robot page does) until this one is restarted. Exiting wouldn't do: systemd would
+                    # restart it at once.
+                    log.warning("another brain replaced this one on the robot; standing down until restarted")
+                    self.replaced = True
+                    await stop.wait()
+                    break
+            except (aiohttp.ClientError, OSError) as e:
+                # Not the error's text: aiohttp's includes the URL, which carries the brain key.
+                status = getattr(e, "status", None)
+                log.warning("robot not reachable (%s%s); retrying in %.0f s", type(e).__name__,
+                            f" {status}" if status else "", delay)
+            if not stop.is_set():
                 try:
-                    async with session.ws_connect(url, heartbeat=10, max_msg_size=8 * 2**20) as ws:
-                        log.info("connected to robot")
-                        delay = 1.0
-                        await self.serve(ws, stop)
-                    if ws.close_code == REPLACED_CLOSE_CODE:
-                        # Another brain connected with the same key and the server dropped us for it. Coming
-                        # back would only knock that one off in turn, over and over, so stay off (like the
-                        # robot page does) until this one is restarted. Exiting wouldn't do: systemd would
-                        # restart it at once.
-                        log.warning("another brain replaced this one on the robot; standing down until restarted")
-                        self.replaced = True
-                        await stop.wait()
-                        break
-                except (aiohttp.ClientError, OSError) as e:
-                    # Not the error's text: aiohttp's includes the URL, which carries the brain key.
-                    status = getattr(e, "status", None)
-                    log.warning("robot not reachable (%s%s); retrying in %.0f s", type(e).__name__,
-                                f" {status}" if status else "", delay)
-                if not stop.is_set():
-                    try:
-                        await asyncio.wait_for(stop.wait(), delay)
-                    except asyncio.TimeoutError:
-                        pass
-                    delay = min(delay * 2, 30)
+                    await asyncio.wait_for(stop.wait(), delay)
+                except asyncio.TimeoutError:
+                    pass
+                delay = min(delay * 2, 30)
 
     async def serve(self, ws: aiohttp.ClientWebSocketResponse, stop: asyncio.Event) -> None:
         self.ws = ws
@@ -449,7 +460,8 @@ class Brain:
     def trips(self):
         """What Rocky's go_to tool uses (rocky.py)."""
         import types
-        return types.SimpleNamespace(names=lambda: self.places.all_names(), go=self.go_to_place, now=self.current_trip)
+        return types.SimpleNamespace(names=lambda: self.places.all_names(), go=self.go_to_place,
+                                     ask=self.ask_trip, now=self.current_trip, people=self.people_at)
 
     def current_trip(self) -> str | None:
         """What the AI driver is doing right now ("going to “kitchen”", "docking", ...), or None."""
@@ -459,7 +471,64 @@ class Brain:
         hint = getattr(self.ears, "hint", None)
         if hint is not None:
             hint(self.places.all_names())                   # so speech recognition expects these words
-        await self.send({"type": "places", "places": self.places.summary()})
+        places = self.places.summary()
+        for p in places:
+            if p.get("sensors"):
+                p["here"] = self.presence.get(p["id"])        # someone there now: True / False / None (unknown)
+        await self.send({"type": "places", "places": places})
+
+    # --- room presence: Home Assistant sensors named on places ---------------------------------------------
+
+    PRESENCE_S = 5.0          # how often the sensors are read
+    PRESENCE_RETRY_S = 60.0   # after HA didn't answer
+
+    def read_presence(self, states: dict[str, bool | None]) -> dict[str, bool | None]:
+        """Sensor states -> place id: someone there (any sensor on), no one (all known and off), or None."""
+        out = {}
+        for pid, ids in self.places.sensors().items():
+            known = [states.get(e) for e in ids if states.get(e) is not None]
+            out[pid] = True if any(known) else (False if known else None)
+        return out
+
+    async def watch_presence(self, session: aiohttp.ClientSession) -> None:
+        """Read the places' presence sensors every few seconds; tell the driving page when that changes. Never
+        logs which rooms have someone in them: only how many sensors, and when HA stops or starts answering."""
+        answering = None
+        while True:
+            wait = self.PRESENCE_S
+            sensors = self.places.sensors() if self.home is not None else {}
+            if sensors:
+                try:
+                    states = await self.home.states(session, [e for ids in sensors.values() for e in ids])
+                    new = self.read_presence(states)
+                    if answering is not True:
+                        log.info("room presence: reading %d sensor(s) for %d place(s)",
+                                 sum(map(len, sensors.values())), len(sensors))
+                    answering = True
+                except Exception as e:
+                    if answering is not False:
+                        log.warning("room presence: Home Assistant didn't answer (%s); trying again every %.0f s",
+                                    type(e).__name__, self.PRESENCE_RETRY_S)
+                    answering, wait = False, self.PRESENCE_RETRY_S
+                    new = {pid: None for pid in sensors}
+            else:
+                new = {}
+            if new != self.presence:
+                self.presence = new
+                if self.ws is not None:
+                    await self.send_places()
+            self._presence_poke.clear()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._presence_poke.wait(), wait)
+
+    def people_at(self) -> dict | None:
+        """For Rocky: {"seen": places someone is at now, "watched": places with sensors}, or None if none."""
+        watched = [p for p in self.places.items if p["id"] in self.places.sensors()]
+        if not watched or self.home is None:
+            return None
+        return {"seen": [self.places.label(p) for p in watched if self.presence.get(p["id"])],
+                "watched": [self.places.label(p) for p in watched],
+                "unknown": [self.places.label(p) for p in watched if self.presence.get(p["id"]) is None]}
 
     async def add_place(self, names) -> None:
         """A place where the robot stands now, facing the way it faces."""
@@ -476,8 +545,8 @@ class Brain:
             await self.send({"type": "notice", "text": f"Saved “{p['names'][0]}” where the robot stands."})
         await self.send_places()
 
-    async def go_to_place(self, name: str, spoken: bool = False) -> tuple[bool, str]:
-        """Start going to a place by id or name (the dock: docking). Returns at once: (started, what to say)."""
+    def _trip_check(self, name: str, spoken: bool) -> tuple[dict | None, str | None]:
+        """The place, and why a trip there can't start now (None: it can)."""
         from .places import DOCK
         p = self.places.find(name)
         why = (f"No place called “{name}”. Places: {', '.join(self.places.all_names())}." if p is None else
@@ -487,6 +556,48 @@ class Brain:
         if why:
             log.info("places: a trip%s not started: %s", " (asked by voice)" if spoken else "",
                      "no such place" if p is None else "already driving" if self.ai_driving() else why)   # a task can be words
+        return p, why
+
+    async def ask_trip(self, name: str) -> tuple[bool, str]:
+        """A trip asked for in the room: not started yet. Rocky asks, and on_heard starts it on a clear "yes".
+        Returns (asking, the place's name) or (False, why not)."""
+        from .rocky import CONFIRM_S
+        p, why = self._trip_check(name, spoken=True)
+        if why:
+            return False, why
+        self.pending_trip = (p["id"], time.monotonic() + CONFIRM_S)
+        log.info("places: a trip asked by voice: waiting for a yes")
+        return True, p["names"][0]
+
+    async def _answer_trip(self, text: str) -> bool:
+        """What was said right after "Going to the kitchen. OK?". True if it was the answer (handled here)."""
+        from .rocky import yes_or_no
+        pid, until = self.pending_trip
+        if self.chat_task is not None and not self.chat_task.done():
+            return False                                # he hasn't asked yet: not an answer
+        self.pending_trip = None
+        if time.monotonic() > until:
+            log.info("places: no yes in time: trip not started")
+            return False
+        answer = yes_or_no(text)
+        if answer is None:
+            log.info("places: not a yes or no: trip not started")
+            return False
+        self.wake.wake_up()                             # still talking with him
+        if answer == "no":
+            log.info("places: heard no: trip not started")
+            self.spawn(self.rocky_say("Okay. Stay here.", "neutral"))
+            return True
+        log.info("places: heard yes: trip confirmed")
+        ok, _ = await self.go_to_place(pid, spoken=True)
+        self.spawn(self.rocky_say("Yes yes. Going." if ok else "Bad. Cannot go now.", "happy" if ok else "sad"))
+        return True
+
+    async def go_to_place(self, name: str, spoken: bool = False) -> tuple[bool, str]:
+        """Start going to a place by id or name (the dock: docking). Returns at once: (started, what to say)."""
+        from .places import DOCK
+        p, why = self._trip_check(name, spoken)
+        if why:
             return False, why
         label = p["names"][0]
 
@@ -600,6 +711,15 @@ class Brain:
             if why:
                 await self.send({"type": "notice", "text": why})
             await self.send_places()
+        elif kind == "place_sensors":
+            why = self.places.set_sensors(str(d.get("id")), d.get("sensors"))
+            if why:
+                await self.send({"type": "notice", "text": why})
+            elif self.home is None:
+                await self.send({"type": "notice", "text": "Saved, but the brain has no Home Assistant connection "
+                                                           "(--home-url), so it can't read them."})
+            self._presence_poke.set()
+            await self.send_places()
         elif kind == "place_remove":
             self.places.remove(str(d.get("id")))
             await self.send_places()
@@ -655,7 +775,13 @@ class Brain:
             await self.send({"type": "notice", "text": "Rocky couldn't think of a reply (the AI service failed)."})
             return
         self.thinking_about = None                       # from here on he's answering: too late to add words
-        log.info("Rocky answered [%s], %d words", emotion, len(words.split()))   # never the words themselves
+        # Never the words themselves. Only whether a saved place's name was in what was asked, so a trip that
+        # didn't start can be told apart: misheard (no name) or the AI not using its trip tool (a name, no go_to).
+        named = ""
+        if self.maps_dir is not None and self.places.items:
+            heard = any(re.search(rf"\b{re.escape(n)}\b", text, re.IGNORECASE) for n in self.places.all_names())
+            named = "; a place name in what was asked" if heard else "; no place name in what was asked"
+        log.info("Rocky answered [%s], %d words%s", emotion, len(words.split()), named)
         voice, tts_s = await self.rocky_say(words, emotion)
         log.info("voice: %s, sound after %s s", voice, tts_s)
         await self.send({"type": "rocky", "sender": sender, "heard": text, "emotion": emotion, "text": words,
@@ -683,6 +809,7 @@ class Brain:
         self.listening = on
         log.info("listening %s", "on" if on else "off")
         if not on:
+            self.pending_trip = None                    # someone drives, or asleep: the question is off
             if self.ears is not None:
                 self.ears.reset()
             self.wake.sleep()
@@ -698,12 +825,14 @@ class Brain:
             self.driver.abort("someone in the room said stop")
             log.info("heard 'stop' while the AI drove: stopped")
             return
+        if self.pending_trip is not None and await self._answer_trip(text):
+            return
         action, words = self.wake.heard(text)
         if action == "ignore":
             log.info("heard speech not meant for Rocky (%d words%s)", len(text.split()),   # never its words
                      ", his name not as 'hey Rocky' first" if self.wake.has_name(text) else "")
             return
-        await self.send({"type": "rocky_awake", "seconds": self.wake.awake_s})
+        await self.send({"type": "rocky_awake", "seconds": self.wake.span})
         if self.wake_reply is not None:
             self.wake_reply.cancel()                   # the question came right after his name: just answer it
             self.wake_reply = None
@@ -735,8 +864,8 @@ class Brain:
         if self.chat_task is not None and not self.chat_task.done():
             return
         log.info("Rocky saw a wave")
-        self.wake.wake_up()
-        await self.send({"type": "rocky_awake", "seconds": self.wake.awake_s, "by": "wave"})
+        self.wake.wake_up(span=WAVE_AWAKE_S)
+        await self.send({"type": "rocky_awake", "seconds": self.wake.span, "by": "wave"})
         await self.send({"type": "face", "emotion": "curious"})
         self.wake_reply = asyncio.create_task(self._question_after(0.3))
 
@@ -936,6 +1065,7 @@ def main() -> None:
             token = load_token(Path(args.data).parent / "ha.key")
             if token:
                 home = HomeAssistant(args.home_url, token)
+                brain.home = home                    # also for room presence (places with sensors)
                 log.info("Rocky can control Home Assistant (room speech, and %d allowed driver(s))",
                          len(brain.home_drivers))
             else:

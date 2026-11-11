@@ -227,6 +227,9 @@ _WAKE_RE = re.compile(r"(?:^|[.!?])\W*" + _FILLER + r"(?:" + "|".join(WAKE_GREET
 _NAME_ONLY_RE = re.compile(r"^\W*" + _NAME + r"\W*$", re.IGNORECASE)    # "Rocky?" on its own: he's being called
 _NAME_RE = re.compile(r"\b" + _NAME + r"\b", re.IGNORECASE)
 AWAKE_S = 60.0       # after "hey Rocky", no need to say his name again for this long
+# After a wave, only this long: a wave can be a gesture to someone else (seen at home: one mid-conversation sent
+# the talk that followed to him).
+WAVE_AWAKE_S = 20.0
 
 
 class Wake:
@@ -237,6 +240,7 @@ class Wake:
 
     def __init__(self, awake_s: float = AWAKE_S):
         self.awake_s, self.until = awake_s, 0.0
+        self.span = awake_s      # how long each thing said keeps him listening: shorter after a wave
 
     @property
     def awake(self) -> bool:
@@ -246,23 +250,28 @@ class Wake:
         now = time.monotonic() if now is None else now
         m = _WAKE_RE.search(text)
         if m:
-            self.until = now + self.awake_s
+            self.span = self.awake_s
+            self.until = now + self.span
             rest = text[m.end():].strip()
             return ("chat", rest) if re.search(r"\w", rest) else ("wake", "")
         if _NAME_ONLY_RE.match(text):
-            self.until = now + self.awake_s
+            self.span = self.awake_s
+            self.until = now + self.span
             return "wake", ""
         if now < self.until and re.search(r"\w", text):
-            self.until = now + self.awake_s
+            self.until = now + self.span
             return "chat", text.strip()
         return "ignore", ""
 
     def sleep(self) -> None:
         self.until = 0.0
 
-    def wake_up(self, now: float | None = None) -> None:
-        """As if he'd heard his name (e.g. someone waved)."""
-        self.until = (time.monotonic() if now is None else now) + self.awake_s
+    def wake_up(self, now: float | None = None, span: float | None = None) -> None:
+        """As if he'd heard his name. span: how long he listens after each thing said (a wave: WAVE_AWAKE_S, and
+        it stays that short until someone says "hey Rocky"); None keeps the current one."""
+        if span is not None:
+            self.span = span
+        self.until = (time.monotonic() if now is None else now) + self.span
 
     @staticmethod
     def has_name(text: str) -> bool:

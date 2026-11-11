@@ -23,6 +23,9 @@ class FakeRange:
     def snapshot(self):
         return {"m": self.m if self.fresh else None, "fresh": self.fresh}
 
+    def readings(self):
+        return [{**self.snapshot(), "angle": 0.0}]
+
     def start(self):
         pass
 
@@ -41,7 +44,9 @@ class FakeLidar:
 
 
 def ctrl(rng=None, lid=None) -> MotorController:
-    c = MotorController(Config(device="/nonexistent", range_device=None, lidar_device=None))
+    """The distances these tests were written for (the defaults until 2026-11-10: see the test below)."""
+    c = MotorController(Config(device="/nonexistent", range_device=None, lidar_device=None, matrix_device=None,
+                               obstacle_stop_m=0.25, obstacle_slow_m=0.80, robot_half_width_m=0.25))
     c.range, c.lidar = rng, lid
     return c
 
@@ -83,6 +88,22 @@ def test_lidar_counts_only_whats_in_the_path():
 def test_the_nearest_of_both_sensors_wins():
     c = ctrl(FakeRange(1.5), FakeLidar([(0.0, 0.26)]))
     assert forward(c) == 0.0 and c.ahead()["by"] == "lidar"
+
+
+class FakeRanges(FakeRange):
+    """Several distance sensors (corner ones too)."""
+
+    def __init__(self, *sensors):
+        self.sensors = sensors
+
+    def readings(self):
+        return [r for s in self.sensors for r in s.readings()]
+
+
+def test_the_nearest_of_several_distance_sensors_wins():
+    assert forward(ctrl(FakeRanges(FakeRange(1.5), FakeRange(0.2), FakeRange(2.0)))) == 0.0
+    assert forward(ctrl(FakeRanges(FakeRange(1.5), FakeRange(None)))) == 0.6
+    assert forward(ctrl(FakeRanges(FakeRange(1.5), FakeRange(None, fresh=False)))) == pytest.approx(0.10)
 
 
 def test_a_silent_sensor_means_crawling():
@@ -168,3 +189,49 @@ async def test_switch_from_the_driving_page():
     finally:
         await client.close()
         await board.stop()
+
+
+def test_the_defaults_fit_a_home():
+    """Stop 15 cm short, slow from 60, the path 18 cm either side (a Beam+ base is 31 cm wide): 25 / 80 / 25 kept
+    the robot out of the laundry corner (a wall it fits beside counted as 0 m ahead)."""
+    c = MotorController(Config(device="/nonexistent", range_device=None, lidar_device=None, matrix_device=None))
+    c.lidar = FakeLidar([(-74.0, 0.21), (-60.0, 0.23), (0.0, 1.5)])     # the wall beside, 20 cm off the centre
+    assert c.ahead()["gap_m"] == pytest.approx(1.44, abs=0.01)
+    c.range = FakeRange(0.16)
+    assert forward(c, linear=0.3) == 0.0                             # 16 cm: just over the line, crawling: stop
+    c.range = FakeRange(0.375)
+    top = c.cfg.max_linear                                           # halfway from 15 to 60 cm: half speed
+    assert forward(c, linear=top) == pytest.approx(top * 0.225 / 0.45, abs=0.01)
+
+
+def test_a_lidar_off_the_centre_line():
+    """Ours sits 3 cm to the left: the paper towels 9 cm off the left wheel (24.5 cm from the centre line) it saw at
+    21.5. Something 20 cm off the centre on the left (4.5 cm from the wheel) it sees at 17: corrected, beside the
+    robot; uncorrected, in its path, 0 m ahead."""
+    towels = FakeLidar([(-80.0, 0.173), (-74.0, 0.177), (0.0, 1.5)])
+    plain = MotorController(Config(device="/nonexistent", range_device=None, lidar_device=None, matrix_device=None))
+    plain.lidar = towels
+    assert plain.ahead()["gap_m"] < 0.05
+    c = MotorController(Config(device="/nonexistent", range_device=None, lidar_device=None, matrix_device=None,
+                               lidar_side_m=-0.03))
+    c.lidar = towels
+    assert c.ahead()["gap_m"] == pytest.approx(1.44, abs=0.01)
+    # ...and on its right, the same correction brings things 3 cm closer: 19 cm from the lidar is 16 from the centre.
+    c.lidar = FakeLidar([(70.0, 0.20), (0.0, 1.5)])
+    assert c.ahead()["gap_m"] < 0.05
+
+
+def test_a_hold_is_logged_with_what_held_it(caplog):
+    c = ctrl(rng=FakeRange(0.20))
+    c.cfg.deadman_s = 60                                              # a driver holding forward throughout
+    t = time.monotonic()
+    with caplog.at_level("INFO", logger="beam.server"):
+        assert c.set_target(0.3, 0.0, ME)
+        c._effective_target(t)
+        c._effective_target(t + 0.5)
+        assert "forward held" not in caplog.text                     # not every flicker
+        c._effective_target(t + 1.2)
+        assert "forward held by sensor 0.20 m ahead" in caplog.text
+        c.range = FakeRange(1.5)
+        c._effective_target(t + 3.0)
+        assert "forward free again after 3.0 s" in caplog.text

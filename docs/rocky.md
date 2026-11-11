@@ -11,6 +11,7 @@ He's built one or two features at a time, each tried on the lab stick before the
 | 1 | Face, personality and voice (Piper, or the Fish Audio Rocky clone); you **type** to him from the driving page | **done** |
 | 2 | He **listens** through the robot's microphone ("hey Rocky"), only while awake and nobody drives, with a sign on screen | **done** |
 | + | He switches **Home Assistant** lights and devices when asked ("turn on the stove lamp") | **done** |
+| + | He knows **who is where** from Home Assistant presence sensors in rooms that are places ("where is everyone?", "come find me") | **new, to try** |
 | 3 | He **sees** when asked: "what do you see?", "is the floor clear?" (head and floor cameras) | **done** |
 | 3b | "What's behind you?" (the phone's rear camera), and looking without being asked | later |
 | 4 | Polish: a **wave** wakes him, a **faster voice** (streamed; other Fish models and settings compared, the current one kept), a **personality editor** | **done** |
@@ -85,7 +86,9 @@ you go on).
 - **His own voice:** the robot page pauses the microphone while he speaks, so he doesn't answer himself.
 - **Or wave:** facing him, wave a raised hand beside your head for a second or two (keep your face in view;
   walking up to him, or past him, doesn't count). He wakes as if you'd said
-  "hey Rocky" ("👋 Rocky saw your wave" on screen, then "Question?"), and you just talk. This is worked out
+  "hey Rocky" ("👋 Rocky saw your wave" on screen, then "Question?"), and you just talk. After a wave he keeps
+  listening only 20 seconds after each thing said (not 60), until someone says "hey Rocky": a wave may have been
+  meant for someone else. This is worked out
   on the brain from the head camera's frames he already gets for faces; no picture goes anywhere. It only
   works when he'd listen anyway (awake, nobody driving, microphone on). `--no-wave` turns it off.
 - The pipeline is ported from desk-robot. Models download once into `~/beam-brain/models`, pinned and
@@ -164,13 +167,45 @@ With named places on the floor map (docs/ai-driving.md), he can be sent to them:
 "go watch TV", "go to your charger". The same people who may switch things may send him (anyone in the room, and
 the `--home-drivers`); for anyone else he says the driver does the moving.
 
-- **Not sure, he asks.** If he isn't sure what he heard or which place is meant, he asks first ("Question: kitchen?")
-  and goes when you say yes. Anything that makes no sense, he asks you to say again rather than guessing.
+- **Asked in the room, he always checks first.** He never moves straight off something he heard: he says
+  "Going to kitchen. OK?" (always those words) and goes only if the next thing said, within 20 seconds, is a
+  plain yes ("yes", "okay", "go ahead", "do it"). "No", "wait", "stop", anything else, or silence: he stays.
+  This is done by the brain, not left to the AI: speech recognition picks up talk not meant for him (seen at
+  home: a wave woke him in the middle of a conversation, and a sentence to someone else started a trip).
+  A driver typing on the driving page is sending him on purpose, so typed trips start at once.
+- **Not sure, he asks.** If he isn't sure what he heard or which place is meant, he asks first ("Question: kitchen?").
+  Anything that makes no sense, he asks you to say again rather than guessing.
 - **Hearing the names.** Speech recognition is told the place names, so it expects them (it helps with accents).
 - **Stop.** While he drives himself nobody is at the controls, so saying **"stop"** in the room stops him at once,
   no name needed. So does any key or STOP on a driving page.
 - He's labelled as the AI on every screen while he drives, and says when he's there (or that he couldn't get there).
   Listening is off while a driving page is open, so to talk to him, close the driving page.
+
+## Who is where (room presence)
+
+A place can name the Home Assistant **presence sensors** in its room (an mmWave radar's occupancy sensor such as
+the Seeed MR60BHA2 kit's "Person Information", a motion sensor, anything `binary_sensor.…` that is on when
+someone is there). The brain then reads them every 5 seconds and:
+
+- shows **👤 here** next to that place on the driving page's Places list, and on the map;
+- tells Rocky which places someone is at, so "hey Rocky, where is everyone?", "come find me" and
+  "go to whoever is home" work: he picks that place and asks "Going to kitchen. OK?" as for any trip.
+  If several have someone he asks which.
+  Only for the people who may send him places; a stranger driving gets nothing about it.
+
+Set up:
+
+1. The brain needs the Home Assistant connection (`--home-url` and `ha.key`, above). HA lets that user read the
+   sensors' states even when they aren't exposed to Assist.
+2. On the driving page, in **📍 Places**, press **👤?** next to a place and type the sensor's entity id
+   (HA: Settings → Devices → the sensor → its presence entity → ⚙ → Entity ID). Several, with commas.
+   👤 means no one is there now, 👤… that HA isn't answering or the sensor is unavailable.
+
+Only rooms that are places count: a sensor elsewhere (a bathroom, a bedroom) is never read. Which rooms have
+someone in them is never written to the brain's log, only how many sensors it reads and whether HA answers.
+The sensors' other readings (breathing and heart rate on the MR60BHA2) are never read. Rocky's AI provider does
+get "someone at: kitchen" with what he's asked, like the place names. Sensors can be slow or wrong, and they
+can't tell who is there.
 
 ## How it works
 

@@ -199,3 +199,22 @@ def test_held_short_by_a_counter_it_still_turns_to_the_saved_way(flat):
     assert result is None
     assert math.hypot(x - 5.5, y - 2.0) < 0.12
     assert abs((math.degrees(th - back) + 180) % 360 - 180) < 10        # the fake gyro reads turns 3.5 % short
+
+
+def test_a_hold_by_a_low_sensor_goes_into_the_next_route():
+    """The lidar can't see what the 8x8 or the ultrasonic holds it for: re-planning with the lidar alone found the
+    same route, three times. Now that spot, across its path, is kept clear of too; and the log says what held it."""
+    from beambrain.navigate import FRONT_OF_AXLE_M, _held_by, _why_held
+
+    class B:
+        telemetry = {"drive": {"obstacle": {"by": "sensor", "gap_m": 0.19, "blind": False}}}
+    pts = _held_by(B)
+    assert pts.shape == (3, 2) and all(abs(p[0] - (0.19 + FRONT_OF_AXLE_M)) < 1e-9 for p in pts)
+    assert {round(p[1], 2) for p in pts} == {-0.15, 0.0, 0.15}
+    assert _why_held(B) == " (sensor, 0.19 m ahead)"
+    B.telemetry = {"drive": {"obstacle": {"by": "lidar", "gap_m": 0.0}}}
+    assert _held_by(B) is None and _why_held(B) == " (lidar, 0.00 m ahead)"   # the lidar's own scan has it
+    B.telemetry = {"drive": {"obstacle": {"gap_m": None, "blind": True}}}
+    assert _held_by(B) is None and _why_held(B) == " (a sensor silent or lost)"
+    B.telemetry = None
+    assert _held_by(B) is None and _why_held(B) == ""

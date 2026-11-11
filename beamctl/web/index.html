@@ -108,6 +108,8 @@
   .placeRow input { flex: 1; min-width: 0; padding: 5px 8px; border-radius: 6px; border: 1px solid #555;
     background: transparent; color: inherit; font: inherit; }
   #placeList { list-style: none; padding: 0; margin: 6px 0 0; }
+  .presence { white-space: nowrap; opacity: 0.7; }
+  .presence.here { opacity: 1; font-weight: 700; color: #3fb950; }
   .mapPlace { position: absolute; transform: translate(-50%, -50%); pointer-events: none; font-size: 11px;
     color: #fff; background: #2f6fde; border-radius: 8px; padding: 0 5px; white-space: nowrap; }
   .ailog { font-size: 12px; color: var(--muted); max-height: 140px; overflow: auto; margin-top: 6px; }
@@ -224,6 +226,8 @@
       <div class="row"><span>Heading</span><span class="num" id="yaw">—</span></div>
       <div class="row"><span>Motors</span><span id="motors">—</span></div>
       <div class="row hiddenCard" id="rangeRow"><span>Distance sensor</span><span class="num" id="range">—</span></div>
+      <div class="row hiddenCard" id="matrixRow" title="The 8x8 sensor: the nearest thing in the robot's path, floor left out"><span>8x8 sensor</span><span class="num" id="matrix">—</span></div>
+      <button class="linkbtn hiddenCard" id="matrixFloorBtn" title="With the robot still and 1 m in front of it clear, the 8x8 sensor learns what the floor looks like, so low things on it (a shoe's toe) count and the floor never does">Learn the floor (8x8 sensor)</button>
       <div class="row"><span>Mode</span><span id="sleepState">—</span></div>
       <button class="linkbtn" id="sleepBtn" title="Cameras, microphone, screen off until woken from this page">🌙 Put to sleep</button>
     </div>
@@ -504,6 +508,7 @@
 
   // ---------- named places: saved where the robot stands, then Go (or "go to the kitchen" to Rocky) ----------
   let places = [];
+  const sensorsOpen = new Set();             // places whose sensor box is open: kept open when presence changes
   $("placeForm").addEventListener("submit", (e) => {
     e.preventDefault();
     const names = $("placeNames").value.trim();
@@ -511,9 +516,18 @@
     send({ type: "brain", data: { kind: "place_add", names } });
     $("placeNames").value = "";
   });
+  let placesLater = null;
   function onPlaces(m) {
-    places = m.places || [];
     const list = $("placeList");
+    // Presence changes resend the list every few seconds: don't redraw under someone typing in it.
+    if (list.contains(document.activeElement) && document.activeElement.tagName === "INPUT") {
+      if (!placesLater) document.activeElement.addEventListener("focusout", () => setTimeout(() => {
+        const later = placesLater; placesLater = null; if (later) onPlaces(later);
+      }, 0), { once: true });
+      placesLater = m;
+      return;
+    }
+    places = m.places || [];
     list.replaceChildren();
     for (const p of places) {
       const li = document.createElement("li");
@@ -527,6 +541,33 @@
       go.textContent = p.dock ? "🔌 Go" : "Go";
       go.addEventListener("click", () => send({ type: "brain", data: { kind: "goto", id: p.id } }));
       li.append(names, go);
+      let sensorRow = null;
+      if (!p.dock) {
+        // Home Assistant presence sensors in this place's room: the brain then knows when someone is there.
+        const who = document.createElement("button");
+        who.className = "linkbtn presence" + (p.here ? " here" : "");
+        who.textContent = !p.sensors ? "👤?" : p.here ? "👤 here" : p.here === false ? "👤" : "👤…";
+        who.title = !p.sensors ? "Add the Home Assistant presence sensor in this room"
+          : p.here ? "Someone is here now (Home Assistant) — click to change the sensors"
+          : p.here === false ? "No one here now (Home Assistant) — click to change the sensors"
+          : "Presence unknown: Home Assistant isn't answering, or the sensor is unavailable";
+        sensorRow = document.createElement("li");
+        sensorRow.className = "placeRow";
+        sensorRow.style.display = sensorsOpen.has(p.id) ? "" : "none";
+        const sensors = document.createElement("input");
+        sensors.placeholder = "binary_sensor.kitchen_presence";
+        sensors.value = (p.sensors || []).join(", ");
+        sensors.title = "Home Assistant presence sensors in this room, separated by commas (empty: none)";
+        sensors.addEventListener("change", () => send({ type: "brain", data: { kind: "place_sensors", id: p.id, sensors: sensors.value } }));
+        sensorRow.append(sensors);
+        who.addEventListener("click", () => {
+          const show = sensorRow.style.display === "none";
+          sensorRow.style.display = show ? "" : "none";
+          if (show) sensorsOpen.add(p.id); else sensorsOpen.delete(p.id);
+          if (show) sensors.focus();
+        });
+        li.append(who);
+      }
       if (!p.dock) {
         const del = document.createElement("button");
         del.className = "linkbtn";
@@ -538,6 +579,7 @@
         li.append(del);
       }
       list.append(li);
+      if (sensorRow) list.append(sensorRow);
     }
     drawPlaces();
   }
@@ -548,7 +590,7 @@
       if (p.dock) continue;                      // the dock is the green dot
       const tag = document.createElement("div");
       tag.className = "mapPlace";
-      tag.textContent = p.names[0];
+      tag.textContent = p.names[0] + (p.here ? " 👤" : "");
       Object.assign(tag.style, mapPx(p.x, p.y));
       $("mapBox").append(tag);
     }
@@ -895,6 +937,11 @@
     if (ask("Put Beam to sleep? Its cameras, microphone and screen turn off until someone wakes it from this page."))
       send({ type: "sleep" });
   });
+  $("matrixFloorBtn").addEventListener("click", () => {
+    if (ask("Learn the floor for the 8x8 sensor? Keep the robot still and the floor clear for 1 m in front of it " +
+            "(step out of its view too). It takes 3 seconds."))
+      send({ type: "matrix_floor", action: "learn" });
+  });
   // The lidar's latest turn (nearest hit per few degrees, cm), front up, plus the low distance sensor in front.
   const LIDAR_M = 3;                                   // metres from the centre to the edge
   function drawLidar(L, R) {
@@ -913,9 +960,11 @@
     }
     g.strokeStyle = col("--line"); g.lineWidth = 2;
     for (let r = 1; r <= LIDAR_M; r++) { g.beginPath(); g.arc(c, c, r * k, 0, 2 * Math.PI); g.stroke(); }
-    if (R && R.fresh && R.m != null && R.m <= LIDAR_M) {
+    // Each distance sensor's reading as an arc the way it faces (an older server sends one, straight ahead).
+    for (const S of (R && (R.sensors || [{ ...R, angle: 0 }])) || []) {
+      if (!S.fresh || S.m == null || S.m > LIDAR_M) continue;
       g.strokeStyle = col("--warn"); g.lineWidth = 6;
-      g.beginPath(); g.arc(c, c, R.m * k, arc(-15), arc(15)); g.stroke();
+      g.beginPath(); g.arc(c, c, S.m * k, arc((S.angle || 0) - 15), arc((S.angle || 0) + 15)); g.stroke();
     }
     if (L.cm) {
       g.fillStyle = col("--accent");
@@ -950,6 +999,8 @@
     let msg = null;
     if (D && D.estop) msg = ["E-STOP ENGAGED", "bad"];
     else if (connected && L && !L.connected) msg = ["Motor board not responding", "warn"];
+    else if (D && D.wheels && D.wheels.blocked)
+      msg = ["Wheels blocked: something stops them turning. Let go, then back up or turn away", "bad"];
     else if (last && last.obstacle_off_by_you) msg = ["Obstacle stop OFF: nothing stops you driving into things", "warn"];
     else if (D && D.obstacle && last.you_have_control && D.obstacle.active && D.obstacle.max_forward <= 0)
       msg = [`Obstacle ${(D.obstacle.gap_m ?? 0).toFixed(2)} m ahead: forward blocked (back up or turn)`
@@ -1001,7 +1052,18 @@
     $("version").textContent = m.version || "—";
     const R = m.range;                  // the ultrasonic sensor, when one is plugged in
     $("rangeRow").classList.toggle("hiddenCard", !R);
-    if (R) $("range").textContent = !R.fresh ? "no data" : R.m == null ? "nothing in range" : `${R.m.toFixed(2)} m`;
+    if (R) {
+      const n = (R.sensors || []).length, quiet = (R.sensors || []).filter((S) => !S.fresh).length;
+      $("range").textContent = (!R.fresh && quiet === n ? "no data" : R.m == null ? "nothing in range" : `${R.m.toFixed(2)} m`)
+        + (n > 1 ? (R.m != null ? ` (nearest of ${n})` : ` (${n} sensors)`) : "")
+        + (quiet && quiet < n ? `, ${quiet} not sending` : "");
+    }
+    const M = m.matrix;                 // the 8x8 matrix sensor, when one is plugged in
+    $("matrixRow").classList.toggle("hiddenCard", !M);
+    if (M) $("matrix").textContent = !M.fresh ? "no data" : M.learning ? "learning the floor…"
+      : M.m == null ? "path clear" : `${M.m.toFixed(2)} m ahead`;
+    $("matrixFloorBtn").classList.toggle("hiddenCard", !M || !M.fresh);
+    if (M) $("matrixFloorBtn").textContent = M.floor ? "Learn the floor again (8x8 sensor)" : "Learn the floor (8x8 sensor)";
     drawLidar(m.lidar, R);
     if (!B) return;
     const pct = B.battery_percent;

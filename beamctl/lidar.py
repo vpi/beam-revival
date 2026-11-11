@@ -31,6 +31,8 @@ DESCRIPTOR = bytes([0xA5, 0x5A, 0x05, 0x00, 0x00, 0x40, 0x81])
 GET_INFO = bytes([0xA5, 0x50])
 INFO = bytes([0xA5, 0x5A, 0x14, 0x00, 0x00, 0x00, 0x04])   # then model, firmware minor, major, hardware, serial (16)
 IDENTIFY_S = 1.0               # how long a port has to answer like a lidar
+IDENTIFY_TRIES = 3            # asked this many times before the port is left alone
+IDENTIFY_GAP_S = 0.5          # between tries (the C1 starts up in well under a second)
 MIN_M, MAX_M = 0.05, 12.0      # what the C1 measures
 BIN_DEG = 2                    # the driving page gets the nearest hit per 2 degrees
 STALE_S = 1.0                  # no complete turn for this long: restart the scan
@@ -144,18 +146,26 @@ class Lidar:
         self._probing = bytearray()
         answer = None
         try:
-            port.write(STOP)                            # in case it's still scanning
-            await asyncio.sleep(0.1)
-            port.flush_input()
-            self._probing.clear()
-            port.write(GET_INFO)
-            deadline = time.monotonic() + IDENTIFY_S
-            while time.monotonic() < deadline and port.is_open:
-                i = self._probing.find(INFO)
-                if i >= 0 and len(self._probing) >= i + len(INFO) + 4:
-                    answer = bytes(self._probing[i + len(INFO):i + len(INFO) + 4])
+            # Seen on ours after a server restart: no answer to the first request (still scanning for the old
+            # server, or starting up after the port opened), then a minute without the lidar. So ask again.
+            for attempt in range(IDENTIFY_TRIES):
+                if attempt:
+                    await asyncio.sleep(IDENTIFY_GAP_S)
+                port.write(STOP)                        # in case it's still scanning
+                await asyncio.sleep(0.1)
+                port.flush_input()
+                self._probing.clear()
+                port.write(GET_INFO)
+                deadline = time.monotonic() + IDENTIFY_S
+                while time.monotonic() < deadline and port.is_open:
+                    i = self._probing.find(INFO)
+                    if i >= 0 and len(self._probing) >= i + len(INFO) + 4:
+                        answer = bytes(self._probing[i + len(INFO):i + len(INFO) + 4])
+                        break
+                    await asyncio.sleep(0.05)
+                if answer is not None or not port.is_open:
                     break
-                await asyncio.sleep(0.05)
+                log.info("%s: no answer to the lidar's device-info request yet (try %d)", path, attempt + 1)
         except OSError:
             pass
         finally:

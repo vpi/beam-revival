@@ -10,6 +10,7 @@ tools is decided in rocky.py and brain.py, not here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -24,6 +25,7 @@ MAX_RESULT_CHARS = 8000      # HA's live context of a whole home is ~20 KB; the 
 TOOLS_TTL_S = 10 * 60        # re-read the tool list now and then (HA adds tools when integrations change)
 LIST_TIMEOUT = aiohttp.ClientTimeout(total=3)   # HA answers in milliseconds; longer means it's busy or away
 RETRY_S = 60                 # after HA failed to list its tools, carry on without asking it for this long
+from .places import SENSOR_ID   # noqa: E402  room presence sensors
 
 
 class HomeError(Exception):
@@ -94,6 +96,26 @@ class HomeAssistant:
             return False, "Home Assistant didn't answer."
         text = "\n".join(c.get("text", "") for c in result.get("content", []) if c.get("type") == "text")
         return not result.get("isError"), text[:MAX_RESULT_CHARS]
+
+    async def states(self, session: aiohttp.ClientSession, entity_ids: list[str]) -> dict[str, bool | None]:
+        """On/off of binary sensors (room presence, places.py), read through HA's REST API with the same token:
+        HA lets any user read states, even of entities not exposed to Assist. None: unknown, unavailable, or HA
+        didn't answer. Raises HomeError only when HA answered none of them."""
+        base = self.url.split("/api/", 1)[0]
+        headers = {"Authorization": self._headers["Authorization"]}
+
+        async def one(eid: str) -> bool | None:
+            async with session.get(f"{base}/api/states/{eid}", headers=headers, timeout=LIST_TIMEOUT) as r:
+                if r.status == 404:
+                    return None                           # no such entity (renamed or removed in HA)
+                if r.status != 200:
+                    raise HomeError(f"HTTP {r.status}")
+                return {"on": True, "off": False}.get(str((await r.json()).get("state")))
+        ids = [e for e in dict.fromkeys(entity_ids) if SENSOR_ID.match(e)]
+        got = await asyncio.gather(*(one(e) for e in ids), return_exceptions=True)
+        if ids and all(isinstance(g, BaseException) for g in got):
+            raise HomeError(type(got[0]).__name__ if not isinstance(got[0], HomeError) else str(got[0]))
+        return {e: (None if isinstance(g, BaseException) else g) for e, g in zip(ids, got)}
 
 
 def load_token(path: str | Path | None = None) -> str | None:

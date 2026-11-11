@@ -4,6 +4,9 @@ where the robot stands (the driving page's Map card), with one or more names. Th
 
 Kept with the map on the brain only (~/beam-brain/maps/places.json): it's part of the floor plan of a home. The map's
 origin is the docked pose, so places stay put when the map is made again, as long as the dock doesn't move.
+
+A place may name the Home Assistant presence sensors in its room (e.g. an mmWave radar's occupancy sensor): the
+brain then knows which places someone is at now (brain.py), shows it on the driving page and tells Rocky.
 """
 
 from __future__ import annotations
@@ -15,7 +18,8 @@ from pathlib import Path
 
 DOCK = "dock"
 DOCK_NAMES = ["dock", "charger"]
-MAX_NAMES, MAX_NAME_LEN, MAX_PLACES = 6, 40, 50
+MAX_NAMES, MAX_NAME_LEN, MAX_PLACES, MAX_SENSORS = 6, 40, 50, 4
+SENSOR_ID = re.compile(r"^binary_sensor\.[a-z0-9_]{1,120}$")
 
 
 def clean_names(text) -> list[str]:
@@ -85,6 +89,29 @@ class Places:
             p["names"] = names
         self.save()
         return None
+
+    def set_sensors(self, pid: str, text) -> str | None:
+        """The Home Assistant presence sensors in a place's room ("binary_sensor.kitchen_presence, ..."), so the
+        brain knows when someone is there. Empty: none. Returns why not, or None."""
+        p = next((p for p in self.items if p["id"] == pid), None)
+        if p is None:
+            return "Only a saved place (not the charger) can have presence sensors."
+        ids = list(dict.fromkeys(s.strip().lower() for s in re.split(r"[,;\s]+", str(text or "")) if s.strip()))
+        bad = [s for s in ids if not SENSOR_ID.match(s)]
+        if bad:
+            return f'"{bad[0][:60]}" isn\'t a Home Assistant binary sensor (binary_sensor.something).'
+        if len(ids) > MAX_SENSORS:
+            return f"At most {MAX_SENSORS} sensors per place."
+        if ids:
+            p["sensors"] = ids
+        else:
+            p.pop("sensors", None)
+        self.save()
+        return None
+
+    def sensors(self) -> dict[str, list[str]]:
+        """{place id: its presence sensors}, for the places that have any."""
+        return {p["id"]: p["sensors"] for p in self.items if p.get("sensors")}
 
     def remove(self, pid: str) -> bool:
         n = len(self.items)

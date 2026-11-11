@@ -10,7 +10,7 @@ from beambrain.brain import Brain
 from beambrain.greeter import Greeter
 from beambrain.people import PeopleStore
 from beambrain.places import DOCK, Places, clean_names
-from beambrain.rocky import Rocky
+from beambrain.rocky import Rocky, yes_or_no
 from test_home import ScriptedLLM
 
 
@@ -76,21 +76,99 @@ async def test_going_to_a_place_or_the_dock(tmp_path):
     assert not ok and "where it is" in text
 
 
-async def test_rocky_goes_when_asked_in_the_room():
-    went = []
+async def test_rocky_asks_before_a_trip_asked_in_the_room():
+    """Seen at home: a wave woke him mid-conversation, and chatter not meant for him started a trip."""
+    went, asked = [], []
 
     async def go(name, spoken):
         went.append((name, spoken))
         return True, "Started going to “kitchen”."
-    trips = types.SimpleNamespace(names=lambda: ["dock", "charger", "kitchen"], go=go)
+
+    async def ask(name):
+        asked.append(name)
+        return True, "kitchen"
+    trips = types.SimpleNamespace(names=lambda: ["dock", "charger", "kitchen"], go=go, ask=ask)
     llm = ScriptedLLM({"name": "go_to", "arguments": {"place": "kitchen"}}, "[happy] Kitchen. Going.")
     rocky = Rocky(llm, trips=trips)
     async with aiohttp.ClientSession() as s:
         emotion, words, actions = await rocky.reply(s, "go to the kitchen", spoken=True, may_control=True)
-    assert went == [("kitchen", True)] and actions[0]["tool"] == "go_to" and actions[0]["ok"]
+    assert went == [] and asked == ["kitchen"]                              # not moving yet
+    assert words == "Going to kitchen. OK?" and actions[0]["asked"]
     first = llm.calls[0]
     assert any(t["function"]["name"] == "go_to" for t in first["tools"])
     assert "Question: kitchen?" in first["messages"][0]["content"]          # told to ask when unsure
+    assert len(llm.calls) == 1                                              # fixed words, not the AI's
+
+    typed = Rocky(ScriptedLLM({"name": "go_to", "arguments": {"place": "kitchen"}}, "[happy] Going."), trips=trips)
+    async with aiohttp.ClientSession() as s:                                # a driver typing: at once
+        await typed.reply(s, "go to the kitchen", "Ann", spoken=False, may_control=True)
+    assert went == [("kitchen", False)]
+
+
+def test_yes_or_no():
+    for yes in ("Yes.", "Okay!", "yeah go ahead", "Yes please", "Do it.", "OK, Rocky", "go", "Sure."):
+        assert yes_or_no(yes) == "yes", yes
+    for no in ("No.", "No, stay", "don't go", "wait", "Cancel that", "not now", "okay no"):
+        assert yes_or_no(no) == "no", no
+    for other in ("", "Thank you.", "please", "right", "yes I told you he was going to the kitchen later",
+                  "it", "and then we went"):
+        assert yes_or_no(other) is None, other
+
+
+async def heard_brain(tmp_path):
+    brain, sent = make_brain(tmp_path)
+    brain.rocky, brain.listening = object(), True
+    brain.localizer = types.SimpleNamespace(pose=(1.5, -0.5, 1.0), state="here")
+    kitchen = brain.places.add("kitchen", (3.0, 1.0, 0.0))
+    trips, said, chats = [], [], []
+
+    async def run_move(kind, amount=0.0, place=None):
+        trips.append((kind, place and place["id"]))
+        return None
+
+    async def rocky_say(words, emotion):
+        said.append(words)
+        return None, None
+
+    async def start_chat(text, sender, spoken=False, login=None):
+        chats.append(text)
+    brain.run_move, brain.rocky_say, brain.start_chat = run_move, rocky_say, start_chat
+    return brain, kitchen, trips, said, chats
+
+
+async def test_a_trip_asked_in_the_room_starts_only_on_yes(tmp_path):
+    brain, kitchen, trips, said, chats = await heard_brain(tmp_path)
+    assert await brain.trips().ask("kitchen") == (True, "kitchen") and trips == []
+    await brain.on_heard("Yes please.")
+    await asyncio.sleep(0.01)
+    assert trips == [("goto", kitchen["id"])] and said == ["Yes yes. Going."] and brain.pending_trip is None
+
+
+async def test_no_or_anything_else_means_no_trip(tmp_path):
+    brain, kitchen, trips, said, chats = await heard_brain(tmp_path)
+    await brain.ask_trip("kitchen")
+    await brain.on_heard("No, stay.")
+    await asyncio.sleep(0.01)
+    assert trips == [] and said == ["Okay. Stay here."]
+    await brain.on_heard("yes")                                             # a late yes: nothing pending
+    assert trips == []
+
+    await brain.ask_trip("kitchen")
+    brain.wake.wake_up()
+    await brain.on_heard("and then he said the kitchen was a mess")         # chatter: just talk
+    await asyncio.sleep(0.01)
+    assert trips == [] and brain.pending_trip is None and chats[-1] == "and then he said the kitchen was a mess"
+
+    await brain.ask_trip("kitchen")
+    brain.pending_trip = (brain.pending_trip[0], 0.0)                       # 20 s went by
+    await brain.on_heard("Yes.")
+    assert trips == []
+
+    await brain.ask_trip("kitchen")
+    await brain.on_listen(True)
+    brain.listening = True
+    await brain.on_listen(False)                                            # someone took the controls
+    assert brain.pending_trip is None
 
 
 async def test_rocky_cant_be_sent_by_a_stranger():
@@ -122,7 +200,7 @@ async def test_rocky_knows_the_trip_he_is_on():
     rocky = Rocky(llm, trips=trips)
     async with aiohttp.ClientSession() as s:
         await rocky.reply(s, "where are you going", spoken=True, may_control=True)
-    assert "You are driving yourself right now: docking" in llm.calls[0]["messages"][0]["content"]
+    assert "You are driving yourself right now: going back to your charger" in llm.calls[0]["messages"][0]["content"]
 
     idle = Rocky(ScriptedLLM("[neutral] Here."), trips=types.SimpleNamespace(names=lambda: ["dock"], go=go,
                                                                                now=lambda: None))
@@ -139,3 +217,37 @@ async def test_a_second_trip_says_what_the_first_one_is(tmp_path):
     assert not ok and "going to “kitchen”" in text
     assert brain.trips().now() == "going to “kitchen”"
     brain.driver_task.cancel()
+
+
+async def test_mid_trip_he_names_only_this_trip():
+    """On the way to the dock after talk of the TV, he said "dock, then living room": he can't line trips up."""
+    trips = types.SimpleNamespace(names=lambda: ["dock", "tv"], go=None, now=lambda: "docking")
+    llm = ScriptedLLM("[thinking] Charger. Going home.")
+    rocky = Rocky(llm, trips=trips)
+    async with aiohttp.ClientSession() as s:
+        await rocky.reply(s, "where are you going", spoken=True, may_control=True)
+    system = llm.calls[0]["messages"][0]["content"]
+    assert "going back to your charger" in system and "none is planned" in system
+    assert "can't line up trips" in system
+
+
+async def test_the_log_says_if_a_place_name_was_heard_never_the_words(tmp_path, caplog):
+    import logging
+    brain, _ = make_brain(tmp_path)
+    brain.places.add("watch tv, tv", (1.0, 0.0, 0.0))
+
+    class Says:
+        async def reply(self, *a):
+            return "happy", "Is good.", []
+    brain.rocky = Says()
+
+    async def say(words, emotion):
+        return None, None
+    brain.rocky_say = say
+    with caplog.at_level(logging.INFO, logger="beambrain"):
+        await brain._chat("go watch TV please", None, spoken=True)
+        await brain._chat("what's the weather", None, spoken=True)
+    lines = [r.getMessage() for r in caplog.records if "Rocky answered" in r.getMessage()]
+    assert lines[0].endswith("; a place name in what was asked")
+    assert lines[1].endswith("; no place name in what was asked")
+    assert not any("watch" in r.getMessage().lower() or "weather" in r.getMessage() for r in caplog.records)

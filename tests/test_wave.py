@@ -86,6 +86,6 @@ async def test_brain_wakes_on_a_wave():
     brain.rocky_say = lambda words, emotion: asyncio.sleep(0, said.append(words))
     await brain.on_wave()
     assert brain.wake.awake
-    assert {"type": "rocky_awake", "seconds": brain.wake.awake_s, "by": "wave"} in sent
+    assert {"type": "rocky_awake", "seconds": 20.0, "by": "wave"} in sent
     await brain.wake_reply
     assert said == ["Question?"]

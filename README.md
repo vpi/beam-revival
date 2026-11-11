@@ -34,9 +34,10 @@ Tested on a real Beam+ (October 2026), running from a USB stick, with the robot'
   remotely from the driving page
 - Optional **phone panel**: a spare Android phone on the robot becomes a touch screen for people in
   the room, a rear camera with a light, and a "Call owner" button ([docs/phone.md](docs/phone.md))
-- Optional **sensors**: a 2D lidar and a low ultrasonic distance sensor give the driving page a live top
-  view of the surroundings and an **obstacle stop** that slows down and stops forward driving before it
-  hits something ([docs/sensors.md](docs/sensors.md))
+- Optional **sensors**: a 2D lidar, a low ultrasonic distance sensor and an 8x8 distance sensor give the
+  driving page a live top view of the surroundings and an **obstacle stop** that slows down and stops
+  forward driving before it hits something 5 cm or taller, and drives over mats, thresholds and flat rugs
+  ([docs/sensors.md](docs/sensors.md))
 - Experimental, on a separate Linux computer (the "brain"): **face recognition** with spoken greetings
   ([docs/brain.md](docs/brain.md)), and **Rocky**, a personality with an animated face on the robot screen
   who answers out loud, typed to by drivers or spoken to in the room with "hey Rocky" (or a wave); he looks
@@ -99,7 +100,7 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 | Sleep mode (button) | **core**, tested | – | always available |
 | Nightly sleep schedule | optional, tested | – | `SLEEP_HOURS`, `TIMEZONE` in `beam.conf` |
 | Phone panel: touch screen for people in the room, rear camera and light, Call owner | optional, tested | a spare Android phone (USB-C, Chrome) | plug it in, see [docs/phone.md](docs/phone.md) |
-| Lidar (Surroundings view), ultrasonic distance sensor, obstacle stop | optional, tested on a Beam+ | Slamtec RPLIDAR C1; DFRobot A02YYUW with a CP2102 USB serial adapter; a powered USB hub in the base | plug them in, see [docs/sensors.md](docs/sensors.md) |
+| Lidar (Surroundings view), ultrasonic and 8x8 distance sensors, obstacle stop | optional, tested on a Beam+ | Slamtec RPLIDAR C1; DFRobot A02YYUW with a CP2102 USB serial adapter; DFRobot SEN0628 8x8 (USB-C); a powered USB hub in the base | plug them in, see [docs/sensors.md](docs/sensors.md) |
 | Face recognition and spoken greetings | **experimental**, tried on a Beam+ | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
 | Rocky: animated face, typed chat from drivers, "hey Rocky" or a wave in the room (only while nobody drives), sight when asked, Home Assistant control, editable personality | **experimental**, tried on a Beam+ | the brain, an AI provider API key; optional Fish Audio key for his voice, optional Home Assistant | see [docs/rocky.md](docs/rocky.md) |
 | Floor map from the lidar, docking from anywhere, named places ("hey Rocky, go to the kitchen") | **experimental**, tried on a Beam+ | the brain, the lidar, the phone panel (its rear camera docks), the printed dock marker sheet | see [docs/ai-driving.md](docs/ai-driving.md) |
@@ -108,7 +109,7 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.6.1` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.6.2` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one

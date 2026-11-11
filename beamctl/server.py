@@ -35,10 +35,12 @@ from aiohttp import WSMsgType, web
 
 from . import protocol as p
 from .lidar import Lidar
-from .rangefinder import RangeSensor
+from .matrixtof import MatrixSensor
+from .rangefinder import RangeSensors
 from .serialport import SerialPort
 from .signaling import MediaHub
 from .sleep import Backlight, SleepManager
+from .stall import StallWatch
 
 log = logging.getLogger("beam.server")
 WEB_DIR = Path(__file__).parent / "web"
@@ -109,20 +111,31 @@ class Config:
     lidar_device: str | None = "auto"
     lidar_mask: str | None = "135-210"
     lidar_rotation: float = 0.0
+    # The 8x8 matrix distance sensor (beamctl/matrixtof.py) on its own USB port: "auto", a port, or None for none.
+    # Where it is: lens height above the floor, how far it points down, and how far behind the front edge it sits.
+    # flip: "x" if its left and right come out swapped, "y" if upside down.
+    matrix_device: str | None = "auto"
+    matrix_height_m: float = 0.10
+    matrix_tilt_deg: float = 0.0
+    matrix_to_front_m: float = 0.0
+    matrix_flip: str = ""
     # Obstacle stop: forward driving slows down from `obstacle_slow_m` and stops at `obstacle_stop_m` (gaps in
     # front of the robot's front edge). The lidar counts what's in the robot's path: `robot_half_width_m` either
     # side of its centre line, measured from `lidar_to_front_m` behind the front edge. The ultrasonic sensor is
     # at the front edge. With a sensor present but silent, or gone since it was seen (unplugged, a USB reset),
     # forward is held to `obstacle_blind_speed`.
     obstacle_stop: bool = True
-    obstacle_stop_m: float = 0.25
-    obstacle_slow_m: float = 0.80
+    obstacle_stop_m: float = 0.15             # was 0.25: too cautious in a home (doorways, the laundry corner)
+    obstacle_slow_m: float = 0.60             # was 0.80
     obstacle_blind_speed: float = 0.10
-    robot_half_width_m: float = 0.25
+    robot_half_width_m: float = 0.18          # a Beam+ base is 31 cm wide (measured), plus 2.5 cm either side (was a
+                                              # guessed 0.25: a wall it fits beside counted as 0 m ahead)
     lidar_to_front_m: float = 0.06       # measured on ours: its centre 6 cm behind the front edge
+    lidar_side_m: float = 0.0            # where the lidar sits off the robot's centre line, + to its right (ours: 3 cm left)
 
 
-OBSTACLE_MIN_SPEED = 0.02   # m/s: an obstacle-limited forward speed below this is a stop
+OBSTACLE_MIN_SPEED = 0.03   # m/s: an obstacle-limited forward speed below this is a stop (no crawling at
+                            # the line: a crawl pushed a flip-flop 15 cm, its near end out of view)
 
 PRIORITY_BRAIN = 0          # autonomy: drives only while no human is driving
 PRIORITY_HUMAN = 1          # a person on a driving page always wins
@@ -167,11 +180,28 @@ class MotorController:
         self._stopping = False
         self._light_pending = True               # (re)send the charging light colour at the next cycle
         self.sleep = SleepManager(cfg.sleep_hours, Backlight(cfg.backlight), cfg.sleep_state)
-        self.range = RangeSensor(cfg.range_device) if cfg.range_device else None
+        self.range = self._range_sensors(cfg.range_device) if cfg.range_device else None
         self.lidar = (Lidar(cfg.lidar_device, cfg.lidar_mask, cfg.lidar_rotation,
                             should_spin=lambda: not self.sleep.asleep) if cfg.lidar_device else None)
+        floor_file = os.path.join(os.path.dirname(cfg.sleep_state), "matrix-floor.json") if cfg.sleep_state else None
+        self.matrix = (MatrixSensor(cfg.matrix_device, cfg.matrix_height_m, cfg.matrix_tilt_deg, cfg.matrix_to_front_m,
+                                    cfg.robot_half_width_m, cfg.matrix_flip, floor_file=floor_file)
+                       if cfg.matrix_device else None)
         self.obstacle_off_for: object | None = None   # the human driver who turned the obstacle stop off
         self._ahead: tuple[tuple, dict] = ((), {})       # the last forward-gap answer, per sensor reading
+        self.stall = StallWatch()                         # beamctl/stall.py: told to move, wheels not turning
+        self._held_since: float | None = None            # forward held by the obstacle stop since (see _note_hold)
+        self._held_logged = False
+
+    @staticmethod
+    def _range_sensors(spec: str) -> RangeSensors:
+        try:
+            return RangeSensors(spec)
+        except ValueError as e:
+            # Never none: a sensor quietly left out would drop out of the obstacle stop. Finding them all
+            # automatically still checks what answers on each port.
+            log.warning("--range-device %s; finding the distance sensors automatically", e)
+            return RangeSensors("auto")
 
     # --- driver input ----------------------------------------------------------
 
@@ -218,6 +248,23 @@ class MotorController:
             self.obstacle_off_for = owner
             log.warning("obstacle stop turned off by a driver")
 
+    def standing_still(self) -> bool:
+        d, link = self.drive, self.link
+        return not (d.target_linear or d.target_angular
+                    or abs(link.commanded_linear) > 0.005 or abs(link.commanded_angular) > 0.005)
+
+    async def learn_matrix_floor(self, who: str) -> tuple[bool, str]:
+        """The 8x8 sensor learns what each of its cells reads as floor (the robot still, the way ahead clear)."""
+        if self.matrix is None:
+            return False, "there's no 8x8 sensor"
+        if self.sleep.asleep:
+            return False, "the robot is asleep: wake it first"
+        if not self.standing_still():
+            return False, "stop the robot first: it has to stand still while the floor is learnt"
+        ok, why = await self.matrix.learn_floor(self.standing_still)
+        log.info("8x8 sensor floor %s (asked by %s): %s", "learnt" if ok else "not learnt", who, why)
+        return ok, why
+
     def obstacle_stop_active(self) -> bool:
         if not self.cfg.obstacle_stop:
             return False
@@ -227,25 +274,26 @@ class MotorController:
         """The gap in front of the robot: {"gap_m": metres or None (nothing seen), "by": "lidar"/"sensor",
         "blind": a sensor is there but silent, or lost, "lost": a sensor seen since start (or named) is gone,
         "sensors": any at all, "max_forward": the speed it allows}."""
-        rng, lid = self.range, self.lidar
-        rs = rng.snapshot() if rng is not None else None
+        rng, lid, mat = self.range, self.lidar, self.matrix
+        rs = [r for s in (rng, mat) if s is not None for r in s.readings()]    # each distance sensor that's there
         lfresh = lid.fresh if lid is not None and lid.present else None     # None: no lidar
-        lost = any(s is not None and s.lost for s in (rng, lid))
-        key = (rs and rs["fresh"] and rs["m"], lfresh and lid.at, lost)
+        lost = any(s is not None and s.lost for s in (rng, lid, mat))
+        key = (tuple((r["fresh"], r["m"]) for r in rs), lfresh and lid.at, lost)
         if key == self._ahead[0]:
             return self._ahead[1]
         cfg, gaps = self.cfg, []
-        if rs and rs["fresh"] and rs["m"] is not None:
-            gaps.append((rs["m"], "sensor"))
+        # A corner sensor's reading counts in full, whichever way it faces: its beam is wide, and what it hears
+        # may be in front of a wheel.
+        gaps += [(r["m"], "sensor") for r in rs if r["fresh"] and r["m"] is not None]
         if lfresh:
             for a, d in lid.points:
                 t = math.radians(a)
-                x, y = d * math.cos(t), d * math.sin(t)
+                x, y = d * math.cos(t), d * math.sin(t) + cfg.lidar_side_m   # from the robot's centre line
                 if x > 0 and abs(y) <= cfg.robot_half_width_m:
                     gaps.append((x - cfg.lidar_to_front_m, "lidar"))
         gap, by = min(gaps) if gaps else (None, None)
         # A lost sensor counts as a silent one: what it saw (the low box, the glass) may still be there.
-        blind = bool((rs and not rs["fresh"]) or lfresh is False or lost)
+        blind = bool(any(not r["fresh"] for r in rs) or lfresh is False or lost)
         limit = cfg.max_linear
         if gap is not None:
             limit *= min(max((gap - cfg.obstacle_stop_m) / (cfg.obstacle_slow_m - cfg.obstacle_stop_m), 0.0), 1.0)
@@ -254,7 +302,7 @@ class MotorController:
         if blind:
             limit = min(limit, cfg.obstacle_blind_speed)
         out = {"gap_m": None if gap is None else round(max(gap, 0.0), 2), "by": by, "blind": blind, "lost": lost,
-               "sensors": rs is not None or lfresh is not None or lost, "max_forward": round(limit, 3)}
+               "sensors": bool(rs) or lfresh is not None or lost, "max_forward": round(limit, 3)}
         self._ahead = (key, out)
         return out
 
@@ -294,11 +342,36 @@ class MotorController:
     def _effective_target(self, now: float) -> tuple[float, float]:
         d = self.drive
         if d.estop or now - d.last_input > self.cfg.deadman_s:
+            self.stall.limit(0.0, 0.0)                   # let go: a blocked way is free to try again
+            self._note_hold(None, now)
             return 0.0, 0.0
-        lin = d.target_linear
+        # Blocked wheels hold for every driver, even with the obstacle stop off: they're stuck on something.
+        lin, ang = self.stall.limit(d.target_linear, d.target_angular)
         if lin > 0 and self.obstacle_stop_active():
-            lin = min(lin, self.ahead()["max_forward"])  # forward only: backing away and turning stay free
-        return lin, d.target_angular
+            a = self.ahead()
+            lin = min(lin, a["max_forward"])            # forward only: backing away and turning stay free
+            self._note_hold(a if lin <= 0 else None, now)
+        else:
+            self._note_hold(None, now)
+        return lin, ang
+
+    def _note_hold(self, a: dict | None, now: float) -> None:
+        """Log forward being held by the obstacle stop (when it lasts a second: not every flicker), with what held
+        it, and when it's free again: a stuck AI drive is otherwise a guess."""
+        if a is None:
+            if self._held_logged:
+                log.info("forward free again after %.1f s", now - self._held_since)
+            self._held_since, self._held_logged = None, False
+            return
+        if self._held_since is None:
+            self._held_since = now
+        if not self._held_logged and now - self._held_since >= 1.0:
+            self._held_logged = True
+            what = f"{a['by']} {a['gap_m']:.2f} m ahead" if a["gap_m"] is not None else "a silent or lost sensor"
+            m = self.matrix.snapshot() if self.matrix is not None else None
+            mat = f"; 8x8 {m.get('m')}" if m else ""
+            r = self.range.snapshot() if self.range is not None else None
+            log.info("forward held by %s%s%s", what, mat, f"; ultrasonic {r.get('m')}" if r else "")
 
     # --- serial callbacks ------------------------------------------------------
 
@@ -320,7 +393,7 @@ class MotorController:
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name="motor-loop")
-        for sensor in (self.range, self.lidar):
+        for sensor in (self.range, self.lidar, self.matrix):
             if sensor is not None:
                 sensor.start()
 
@@ -329,7 +402,7 @@ class MotorController:
         if self._task:                     # first, so the loop can't slip a moving command between the zeros
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
-        for sensor in (self.range, self.lidar):
+        for sensor in (self.range, self.lidar, self.matrix):
             if sensor is not None:
                 await sensor.stop()
         powering_off = self.cfg.power_off_delay_s > 0 and await asyncio.to_thread(system_powering_off)
@@ -411,6 +484,7 @@ class MotorController:
                 link.timeouts += 1
             else:
                 link.status = status
+                self.stall.update(time.monotonic(), status.encoder_l, status.encoder_r, lin, ang)
                 link.replies += 1
                 link.last_reply = time.monotonic()
                 link.connected = True
@@ -420,6 +494,7 @@ class MotorController:
             link.connected = False
             # Never resume at speed after an outage.
             link.commanded_linear = link.commanded_angular = 0.0
+            self.stall.reset()
             self._port.close()
             return
 
@@ -483,11 +558,13 @@ class MotorController:
                 "max_angular": self.cfg.max_angular,
                 "obstacle": {"active": self.obstacle_stop_active(), "off": self.obstacle_off_for is not None,
                              **self.ahead()},
+                "wheels": self.stall.snapshot(),
             },
             "board": link.status.to_dict() if link.status else None,
             "sleep": self.sleep.snapshot(),
             "range": self.range.snapshot() if self.range is not None else None,
             "lidar": self.lidar.snapshot() if self.lidar is not None else None,
+            "matrix": self.matrix.snapshot() if self.matrix is not None else None,
         }
 
 
@@ -827,6 +904,7 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                 await asyncio.sleep(1.0 / cfg.telemetry_hz)
 
         pusher = asyncio.create_task(push())
+        learning: set[asyncio.Task] = set()       # floor learning for the 8x8 sensor, asked from this page
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -849,6 +927,19 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                         await hub.sleep_changed()
                     elif kind == "obstacle_stop":
                         ctrl.set_obstacle_stop(bool(m.get("on")), me)
+                    elif kind == "matrix_floor":
+                        if m.get("action") == "forget" and ctrl.matrix is not None:
+                            ctrl.matrix.forget_floor()
+                            log.info("8x8 sensor floor forgotten (asked by %s)", who or "a driver")
+                            await ws.send_json({"type": "notice", "text": "8x8 sensor: floor forgotten"})
+                        elif m.get("action") == "learn":
+                            async def learn() -> None:          # in the background: STOP still gets through
+                                ok, why = await ctrl.learn_matrix_floor(who or "a driver")
+                                if not ws.closed:
+                                    await ws.send_json({"type": "notice" if ok else "denied", "reason": why,
+                                                        "text": f"8x8 sensor: {why}"})
+                            learning.add(asyncio.create_task(learn()))
+                            learning.difference_update({t for t in learning if t.done()})
                     elif kind == "estop":
                         ctrl.set_estop(True, me, f"driving page {pid}")
                     elif kind == "release_estop":
@@ -969,13 +1060,24 @@ def main() -> None:
     ap.add_argument("--light-color", type=lambda s: int(s, 0), default=Config.light_color,
                     help="charging light colour, as the board understands it (default 0x0F00 = green; 0 = off)")
     ap.add_argument("--range-device", default="auto",
-                    help="ultrasonic distance sensor's serial port, 'auto' (default: a CP2102 adapter) or 'none'")
+                    help="ultrasonic distance sensors: 'auto' (default: every CP2102 adapter sending their frames), 'none', "
+                         "or ports, each with the way it faces: PORT@-30,PORT@0,PORT@30 (degrees, clockwise)")
     ap.add_argument("--lidar-device", default="auto",
                     help="2D lidar's serial port, 'auto' (default: a CP2102N adapter) or 'none'")
     ap.add_argument("--lidar-mask", default=Config.lidar_mask,
                     help="degrees (clockwise from straight ahead) the mast hides, e.g. 135-210; '' for none")
     ap.add_argument("--lidar-rotation", type=float, default=0.0,
                     help="degrees to add to the lidar's angles if its arrow doesn't point to the front")
+    ap.add_argument("--matrix-device", default="auto",
+                    help="8x8 matrix distance sensor's USB port, 'auto' (default: an RP2040 sending its frames) or 'none'")
+    ap.add_argument("--matrix-height", type=float, default=Config.matrix_height_m,
+                    help="its lens above the floor, metres (default %(default)s)")
+    ap.add_argument("--matrix-tilt", type=float, default=Config.matrix_tilt_deg,
+                    help="degrees it points down (negative: up; default %(default)s)")
+    ap.add_argument("--matrix-to-front", type=float, default=Config.matrix_to_front_m,
+                    help="how far behind the front edge it sits, metres (default %(default)s)")
+    ap.add_argument("--matrix-flip", default="", choices=["", "x", "y", "xy"],
+                    help="x: its left and right come out swapped; y: it's upside down")
     ap.add_argument("--no-obstacle-stop", action="store_true",
                     help="don't slow down and stop for obstacles ahead (lidar / ultrasonic sensor)")
     ap.add_argument("--obstacle-stop-m", type=float, default=Config.obstacle_stop_m,
@@ -984,6 +1086,7 @@ def main() -> None:
                     help="start slowing down at this gap in front, metres (default %(default)s)")
     ap.add_argument("--robot-half-width", type=float, default=Config.robot_half_width_m, help=argparse.SUPPRESS)
     ap.add_argument("--lidar-to-front", type=float, default=Config.lidar_to_front_m, help=argparse.SUPPRESS)
+    ap.add_argument("--lidar-side", type=float, default=Config.lidar_side_m, help=argparse.SUPPRESS)
     # systemd's StateDirectory= sets $STATE_DIRECTORY: remember sleep there across restarts.
     ap.add_argument("--sleep-state", default=os.path.join(os.environ["STATE_DIRECTORY"], "sleep.json")
                     if os.environ.get("STATE_DIRECTORY") else None, help=argparse.SUPPRESS)
@@ -1005,9 +1108,13 @@ def main() -> None:
                  range_device=None if args.range_device == "none" else args.range_device,
                  lidar_device=None if args.lidar_device == "none" else args.lidar_device,
                  lidar_mask=args.lidar_mask or None, lidar_rotation=args.lidar_rotation,
+                 matrix_device=None if args.matrix_device == "none" else args.matrix_device,
+                 matrix_height_m=args.matrix_height, matrix_tilt_deg=args.matrix_tilt, matrix_to_front_m=args.matrix_to_front,
+                 matrix_flip=args.matrix_flip,
                  obstacle_stop=not args.no_obstacle_stop, obstacle_stop_m=args.obstacle_stop_m,
                  obstacle_slow_m=max(args.obstacle_slow_m, args.obstacle_stop_m + 0.05),
-                 robot_half_width_m=args.robot_half_width, lidar_to_front_m=args.lidar_to_front)
+                 robot_half_width_m=args.robot_half_width, lidar_to_front_m=args.lidar_to_front,
+                 lidar_side_m=args.lidar_side)
     if cfg.token is None:
         log.warning("no --token set: anyone on this network can drive the robot")
     ssl_ctx = None

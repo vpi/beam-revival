@@ -1,7 +1,7 @@
 """Driving somewhere on the floor map (lidarmap.py), by where the robot is on it (localize.py).
 
 Planning (Planner.plan): a shortest route over the map's 5 cm squares (A*) that keeps the robot's middle at least
-CLEAR_M from anything the map has as a wall, furniture or never seen, and prefers PREFER_M: the cost of a square
+CLEAR_M from anything the map has as a wall, furniture or never seen (a Beam+ base is 31 cm wide), and prefers PREFER_M: the cost of a square
 grows as it gets nearer than that, so routes run down the middle of doorways and gaps rather than skimming a wall.
 Near the start and the goal it may come closer (the dock is against a wall).
 
@@ -28,15 +28,18 @@ from .lidarmap import RES, Grid, scan_points
 
 log = logging.getLogger("beambrain.navigate")
 
-CLEAR_M = 0.30                     # the robot is 0.5 m wide: its middle never nearer a wall than this
+CLEAR_M = 0.22                     # a Beam+ base is 31 cm wide (measured; it was taken for 50): its middle never
+                                   # nearer a wall than this, so the server's obstacle stop (18 cm) never holds it
 PREFER_M = 0.55                    # ...and the route keeps this far off when it can
-NEAR_ENDS_M, NEAR_ENDS_CLEAR_M = 0.6, 0.12   # within this of the start or goal it may come this close
+NEAR_ENDS_M, NEAR_ENDS_CLEAR_M = 0.6, 0.17   # within this of the start or goal it may come this close (was 0.12:
+                                              # closer than the robot's own half-width)
 SPEED, TURN_SPEED = 0.2, 0.5       # m/s, rad/s: slow, it is a home
 LOOKAHEAD_M = 0.45
 ARRIVED_M = 0.08
 OFF_ROUTE_M = 0.4
 TURN_FIRST_DEG = 50                # the route's next point further round than this: turn on the spot first
 WAIT_BLOCKED_S = 3.0
+FRONT_OF_AXLE_M = 0.095            # the base's front edge, ahead of the axle (lidarmap: measured)
 CLOSE_ENOUGH_M = 0.25              # held up this near the spot: finish from there (turn, nudge) instead of re-planning
 SETTLE_S = 1.5                     # at the spot, facing the saved way: time for a fresh look before the last nudge
 FINAL_SIDE_M, FINAL_MAX_M = 0.15, 0.6   # the last nudge only straight forward or back, and only this far
@@ -133,6 +136,7 @@ async def go_to(brain, d, planner: Planner, goal: tuple[float, float, float | No
     loc = brain.localizer
     route, i = None, 0
     blocked_since, retries = None, 0
+    held: np.ndarray | None = None         # where a distance sensor (not the lidar) held it, robot frame
     t0, limit = time.monotonic(), 120.0
     lost_since = None
     b = d._board()
@@ -158,6 +162,8 @@ async def go_to(brain, d, planner: Planner, goal: tuple[float, float, float | No
                 obstacles = None
                 if retries:
                     pts = scan_points(((brain.telemetry or {}).get("scan") or {}).get("cm") or [])
+                    if held is not None:                 # the lidar doesn't see it: keep round it too
+                        pts = np.r_[pts, held] if len(pts) else held
                     c, s = math.cos(th), math.sin(th)
                     obstacles = np.c_[x + c * pts[:, 0] - s * pts[:, 1], y + s * pts[:, 0] + c * pts[:, 1]] if len(pts) else None
                 route = await asyncio.to_thread(planner.plan, (x, y), goal[:2], obstacles)
@@ -185,6 +191,11 @@ async def go_to(brain, d, planner: Planner, goal: tuple[float, float, float | No
             lx, ly = route[j]
             alpha = _wrap(math.atan2(ly - y, lx - x) - th)
             b = d._board()
+            wheels = ((brain.telemetry or {}).get("drive") or {}).get("wheels") or {}
+            if wheels.get("blocked"):
+                # The server stopped it: told to move, the wheels didn't turn (a shoe under one, a low step). Going
+                # round needs to know what it is, which no sensor saw: stop here, don't push again.
+                return "the wheels got stuck on something"
             if abs(alpha) > math.radians(TURN_FIRST_DEG):
                 v, w = 0.0, math.copysign(TURN_SPEED, alpha)
             else:
@@ -206,9 +217,10 @@ async def go_to(brain, d, planner: Planner, goal: tuple[float, float, float | No
                                  to_goal * 100, what)
                         break
                     retries += 1
+                    held = _held_by(brain)
                     if retries > 2:
-                        return "something is in the way"
-                    log.info("navigate: something in the way; planning round it")
+                        return "something is in the way" + _why_held(brain)
+                    log.info("navigate: something in the way%s; planning round it", _why_held(brain))
                     route, blocked_since = None, None
                     continue
             else:
@@ -235,6 +247,27 @@ async def go_to(brain, d, planner: Planner, goal: tuple[float, float, float | No
         log.info("navigate: at %s, %.0f cm ahead of the spot, %.0f cm to its left", what, -along * 100, -side * 100)
     return None
 
+
+def _obstacle(brain) -> dict:
+    return ((brain.telemetry or {}).get("drive") or {}).get("obstacle") or {}
+
+
+def _why_held(brain) -> str:
+    """What the server says holds it, for the log: a stuck drive is otherwise a guess."""
+    ob = _obstacle(brain)
+    if ob.get("gap_m") is None:
+        return " (a sensor silent or lost)" if ob.get("blind") else ""
+    return f" ({ob.get('by')}, {ob['gap_m']:.2f} m ahead)"
+
+
+def _held_by(brain) -> np.ndarray | None:
+    """If a distance sensor (the 8x8 or the ultrasonic, low down) holds it, not the lidar: points across its path
+    where that is, in the robot's frame (from the axle), so the next route keeps clear of what the lidar can't see."""
+    ob = _obstacle(brain)
+    if ob.get("by") != "sensor" or ob.get("gap_m") is None:
+        return None
+    x = ob["gap_m"] + FRONT_OF_AXLE_M
+    return np.array([[x, -0.15], [x, 0.0], [x, 0.15]])
 
 def _offset(pose, goal) -> tuple[float, float]:
     """Where the goal is from the robot: metres ahead of it, and to its left."""

@@ -87,7 +87,34 @@ MOVING = """\
 "charger" (and charging, resting, going home) mean your charger.
 - Go only when they clearly ask you to go somewhere. If you are not sure what they said or which place they mean, \
 do NOT move: ask one short question ("Question: kitchen?") and go when they say yes. A place not on your map: say \
-so and name the ones you know. After go_to answers, say in a few words where you are going (or why not)."""
+so and name the ones you know. After go_to answers, say in a few words where you are going (or why not). \
+When someone in the room asks, go_to doesn't move you at once: you ask them to say yes first.
+- One trip at a time, from wherever you are: you can't line up trips ("then the TV"). When this one is over, \
+they ask again. Never say you will go somewhere next."""
+
+
+def confirm_question(place: str) -> str:
+    """What he says before a trip asked for in the room. Fixed words, not the AI's."""
+    return f"Going to {place}. OK?"
+
+
+# The answer to that question, said on its own. Anything else (or nothing within CONFIRM_S) means no trip.
+_YES = {"yes", "yeah", "yep", "yup", "ya", "yah", "ok", "okay", "sure", "go", "correct", "affirmative", "alright"}
+_ALSO = {"please", "ahead", "do", "it", "go", "then"}       # "yes please", "go ahead", "do it", "okay then"
+_NO = {"no", "nope", "nah", "don't", "dont", "stop", "cancel", "wait", "never", "nevermind", "not", "stay"}
+_FILLER_WORDS = {"hey", "hi", "um", "uh", "oh", "so", "well", "rocky", "rockey", "rockie", "rocki", "roki"}
+CONFIRM_S = 20.0
+
+
+def yes_or_no(text: str) -> str | None:
+    """"yes", "no", or None (something else: not an answer)."""
+    words = [w for w in re.findall(r"[a-z']+", text.lower()) if w not in _FILLER_WORDS]
+    if any(w in _NO for w in words):
+        return "no"
+    if (0 < len(words) <= 4 and all(w in _YES or w in _ALSO for w in words)
+            and (any(w in _YES for w in words) or words == ["do", "it"])):
+        return "yes"
+    return None
 BLIND = """\
 - You get no pictures from your cameras right now, only the names of people your face recognition knows and \
 sees in front of you (below, when there are any). Never describe the room, what people wear or do, or anything \
@@ -114,7 +141,7 @@ def go_tool(places: list[str]) -> dict:
     return {"type": "function", "function": {
         "name": "go_to",
         "description": "Drive yourself to a place on your map (the dock or charger: back onto your charger). "
-                       "Starts the trip and answers at once.",
+                       "Starts the trip and answers at once (asked in the room: once they say yes).",
         "parameters": {"type": "object", "properties": {
             "place": {"type": "string", "enum": places, "description": "Which place."}},
             "required": ["place"]}}}
@@ -183,6 +210,21 @@ def situation(sender: str | None, in_view: list[str], spoken: bool = False) -> s
     return f"Right now: {who}; their messages start with their name.{seen} Answer what they say."
 
 
+def presence_note(at: dict) -> str:
+    """Which places the home's presence sensors see someone at (brain.people_at): for "where is everyone?" and
+    "come find me". Only for people who may send him places."""
+    watched = ", ".join(at["watched"])
+    if at["seen"]:
+        now = f"see someone now at: {', '.join(at['seen'])}"
+    elif len(at["unknown"]) == len(at["watched"]):
+        now = "aren't answering right now, so you don't know who is where"
+    else:
+        now = "see no one at those places now"
+    return (f"The home's presence sensors (only at: {watched}) {now}. Use this when asked where people are, or "
+            "to go to someone: go_to that place (if there are several, ask which). Sensors can be slow or wrong, "
+            "and they can't tell who it is. Don't bring it up otherwise.")
+
+
 class Rocky:
     def __init__(self, llm: LLM, temperature: float = 0.7, home=None, eyes=None, trips=None):
         """home: a beambrain.home.HomeAssistant, or None for no home control.
@@ -211,13 +253,22 @@ class Rocky:
         now = getattr(self.trips, "now", None)
         trip = now() if callable(now) else None
         if trip:
-            # Without this, asked mid-trip he went by the conversation and named the wrong place.
-            system += (f" You are driving yourself right now: {trip}. If they ask where you are going, say that; "
-                       "don't start another trip until it's over.")
+            # Without this, asked mid-trip he went by the conversation and named the wrong place; and once, on
+            # the way to the dock after talk of the TV, he said "dock, then living room".
+            if trip.startswith("docking"):
+                trip = "going back to your charger (docking)"
+            system += (f" You are driving yourself right now: {trip}. If they ask where you are going, say only "
+                       "that, nothing after it: you can't plan a next trip, and none is planned. Don't start "
+                       "another trip until this one is over.")
+        people = getattr(self.trips, "people", None)
+        at = people() if places and callable(people) else None
+        if at:
+            system += " " + presence_note(at)
         tools = [LOOK_TOOL] if self.eyes else []
         if places:
             tools.append(go_tool(places))
         went = False
+        confirm: str | None = None     # a spoken trip he must ask about first: the place's name
         home_tools = []
         if self.home is not None:
             if may_control:
@@ -257,13 +308,24 @@ class Rocky:
                         pictures.append((camera, jpeg))
                     actions.append({"tool": "look", "args": {"camera": camera}, "ok": ok})
                 elif call["name"] == "go_to" and places:
+                    place = str(call["arguments"].get("place", ""))
                     if went:
                         ok, out = False, "Not done: one trip at a time."
+                    elif spoken and getattr(self.trips, "ask", None) is not None:
+                        # Heard in the room: never straight off. Speech recognition hears chatter not meant for
+                        # him, so he asks, and the brain starts the trip only on a clear "yes" (brain.on_heard).
+                        went = True
+                        ok, label = await self.trips.ask(place)
+                        if ok:
+                            confirm = label
+                        out = label if not ok else "Not started yet: they must say yes first."
                     else:
                         went = True
-                        ok, out = await self.trips.go(str(call["arguments"].get("place", "")), spoken)
-                    actions.append({"tool": "go_to", "args": call["arguments"], "ok": ok})
-                    log.info("go_to -> %s", "started" if ok else "not started")
+                        ok, out = await self.trips.go(place, spoken)
+                    actions.append({"tool": "go_to", "args": call["arguments"], "ok": ok,
+                                    **({"asked": True} if confirm is not None else {})})
+                    log.info("go_to -> %s", "asking first" if confirm is not None else
+                             "started" if ok else "not started")
                 elif any(t["function"]["name"] == call["name"] for t in home_tools):
                     ok, out = await self.home.call(session, call["name"], call["arguments"])
                     actions.append({"tool": call["name"], "args": call["arguments"], "ok": ok})
@@ -279,6 +341,14 @@ class Rocky:
                     content += [{"type": "text", "text": f"{camera.upper()} camera, just now:"},
                                 {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + jpeg}}]
                 messages.append({"role": "user", "content": content})
+            if confirm is not None:
+                break                  # the question is fixed (below): no need to ask the AI for words
+        if confirm is not None:
+            # Always the same words, so everyone in the room knows what a "yes" will do.
+            emotion, words = "curious", confirm_question(confirm)
+            self.history += [user, {"role": "assistant", "content": f"[{emotion}] {words}"}]
+            self.history = self.history[-2 * HISTORY_TURNS:]
+            return emotion, words, actions
         emotion, words = parse_reply(r.text)
         if (emotion, words) != FALLBACK:
             self.history += [user, {"role": "assistant", "content": f"[{emotion}] {words}"}]

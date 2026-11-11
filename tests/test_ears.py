@@ -346,3 +346,15 @@ async def test_words_after_a_mid_sentence_pause_are_answered_together():
     await brain.chat_task
     assert "do you like coffee or tea?" in llm.asked[-1]
     assert said == ["Both, yes."]                    # one answer, to the whole sentence
+
+
+def test_after_a_wave_he_listens_only_20_seconds():
+    """A wave can be meant for someone else: talk after it keeps him listening 20 s at a time, not 60, until
+    someone says "hey Rocky"."""
+    w = Wake(awake_s=60)
+    w.wake_up(now=0, span=20)
+    assert w.heard("what is your name", now=15) == ("chat", "what is your name")
+    assert w.heard("and then we went home", now=36) == ("ignore", "")      # 21 s later: not for him
+    w.wake_up(now=100, span=20)
+    assert w.heard("Hey Rocky, hello", now=105)[0] == "chat"
+    assert w.heard("how are you", now=160)[0] == "chat"                      # "hey Rocky": 60 s again

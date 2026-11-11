@@ -149,7 +149,7 @@ door 1.5 m out, gets one 1.1 m straight out), facing it; then docking carries on
 it in the Map card's 📍 Places with one or more names ("living room, lounge"). The dock is always a place ("dock",
 "charger"; renamable), and going there means docking. **Go** next to a place drives there by the map; Rocky can be
 asked too (docs/rocky.md). Places are kept with the map on the brain only (`~/beam-brain/maps/places.json`). The map's
-origin is the docked pose, so they stay put if the map is made again with the dock in the same spot.
+origin is the docked pose, so they stay put if the map is made again with the dock in the same spot. A place can also name its room's Home Assistant presence sensors (👤, docs/rocky.md "Who is where").
 
 ## The bake-off
 

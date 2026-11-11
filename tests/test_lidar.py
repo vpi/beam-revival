@@ -167,3 +167,34 @@ async def test_a_named_port_must_answer_too(monkeypatch):
         await lid.stop()
         os.close(master)
         os.close(slave)
+
+
+async def test_a_lidar_that_misses_the_first_request_is_still_found(monkeypatch):
+    """Seen after a server restart: no answer the first time, then a minute without the lidar."""
+    monkeypatch.setattr(lidar, "IDENTIFY_S", 0.2)
+    monkeypatch.setattr(lidar, "IDENTIFY_GAP_S", 0.05)
+    master, slave = os.openpty()
+    os.set_blocking(master, False)
+    lid = Lidar(os.ttyname(slave))
+    asked, got = [0], bytearray()
+
+    def answer():                                   # silent to the first request, answers the second
+        try:
+            got.extend(os.read(master, 4096))
+        except BlockingIOError:
+            pass
+        if GET_INFO in got:
+            asked[0] += 1
+            got.clear()
+            if asked[0] >= 2:
+                os.write(master, INFO + bytes([0x41, 1, 1, 18]) + bytes(16))
+        return lid.present
+
+    lid.start()
+    try:
+        assert await wait_for(answer)
+        assert asked[0] == 2 and not lid.picker.rejected
+    finally:
+        await lid.stop()
+        os.close(master)
+        os.close(slave)

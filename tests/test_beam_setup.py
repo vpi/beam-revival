@@ -101,7 +101,7 @@ def test_config_bad_token_keeps_the_server_locked(bs, tmp_path, monkeypatch):
     stand_in = bs.STAND_IN_TOKEN.read_text()
     sk = bs.SCREEN_KEY.read_text()
     assert env == f"BEAM_ARGS=--host 127.0.0.1 --max-linear 0.3\nBEAM_TOKEN={stand_in}\nBEAM_SCREEN_KEY={sk}\n"
-    assert "my" not in env and "secret" not in env
+    assert "my secret" not in env and stand_in != "my secret"     # not "my": a random token can contain it
     assert bs.KIOSK_URL.read_text() == f"http://localhost:8080/robot?token={stand_in}&screen_key={sk}\n"
     message = bs.json.loads(bs.SETUP.read_text())["message"]
     assert "ACCESS_TOKEN must be" in message and "MAX_SPEED not understood" in message
@@ -253,8 +253,44 @@ def test_sensor_ports(bs):
         assert device == "auto" and "LIDAR_DEVICE not understood" in problem, bad   # never "none"
 
 
+def test_several_distance_sensors(bs):
+    conf = {"RANGE_DEVICE": "usb-a-if00@-30, usb-b-if00 ,usb-c-if00@+30"}
+    by = "/dev/serial/by-id/"
+    assert bs.serial_device(conf, "RANGE_DEVICE") == (f"{by}usb-a-if00@-30,{by}usb-b-if00,{by}usb-c-if00@30", None)
+    for bad in ("usb-a@left", "usb-a@200", "usb-a,,usb-b", "usb-a@-30;id", "usb-a@"):
+        device, problem = bs.serial_device({"RANGE_DEVICE": bad}, "RANGE_DEVICE")
+        assert device == "auto" and "several with commas" in problem, bad
+    device, _ = bs.serial_device({"LIDAR_DEVICE": "usb-a,usb-b"}, "LIDAR_DEVICE")
+    assert device == "auto"                                       # one lidar only
+
+
 def test_sensor_ports_reach_the_server(bs, tmp_path, monkeypatch):
     config_rig(bs, tmp_path, monkeypatch, "WIFI_SSID=home\nLIDAR_DEVICE=usb-lidar-if00\nRANGE_DEVICE=none\n")
     bs.cmd_config()
     args = next(l for l in bs.SERVER_ENV.read_text().splitlines() if l.startswith("BEAM_ARGS="))
     assert args.endswith(" --lidar-device /dev/serial/by-id/usb-lidar-if00 --range-device none")
+
+
+def test_the_8x8_sensor_settings_reach_the_server(bs, tmp_path, monkeypatch):
+    config_rig(bs, tmp_path, monkeypatch, "WIFI_SSID=home\nMATRIX_DEVICE=none\nMATRIX_HEIGHT_CM=12\n"
+                                          "MATRIX_TILT_DEG=15\nMATRIX_FLIP=X\n")
+    bs.cmd_config()
+    args = next(l for l in bs.SERVER_ENV.read_text().splitlines() if l.startswith("BEAM_ARGS="))
+    assert args.endswith(" --matrix-device none --matrix-height 0.12 --matrix-tilt 15 --matrix-flip x")
+    assert bs.matrix_mount({}) == ("", [])
+    for bad in ({"MATRIX_HEIGHT_CM": "12; reboot"}, {"MATRIX_TILT_DEG": "90"}, {"MATRIX_FLIP": "z"}):
+        args, problems = bs.matrix_mount(bad)
+        assert args == "" and len(problems) == 1, bad
+
+
+def test_the_robot_width_and_obstacle_distances_reach_the_server(bs, tmp_path, monkeypatch):
+    config_rig(bs, tmp_path, monkeypatch, "WIFI_SSID=home\nROBOT_WIDTH_CM=31\nLIDAR_SIDE_CM=-3\n"
+                                          "OBSTACLE_STOP_CM=12\nOBSTACLE_SLOW_CM=50.5\n")
+    bs.cmd_config()
+    args = next(l for l in bs.SERVER_ENV.read_text().splitlines() if l.startswith("BEAM_ARGS="))
+    assert args.endswith(" --robot-half-width 0.18 --lidar-side -0.03 --obstacle-stop-m 0.12 --obstacle-slow-m 0.505")
+    assert bs.obstacle_settings({}) == ("", [])
+    for bad in ({"ROBOT_WIDTH_CM": "44; reboot"}, {"ROBOT_WIDTH_CM": "200"}, {"OBSTACLE_STOP_CM": "-5"},
+                {"OBSTACLE_SLOW_CM": "1e3"}, {"LIDAR_SIDE_CM": "20"}, {"LIDAR_SIDE_CM": "left"}):
+        args, problems = bs.obstacle_settings(bad)
+        assert args == "" and len(problems) == 1, bad
