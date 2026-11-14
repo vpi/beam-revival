@@ -142,7 +142,9 @@ MAX_ANGLE_IN = 20.0                # ... at most (the markers must stay in the r
 SQUARE_FOR_M = 0.15                # straight and square for the last bit onto the contacts
 TURN_GAIN = 1.5                    # turn rate (1/s) per radian of heading error
 MAX_TURN = 0.2                     # rad/s
-AIM_FIRST_DEG = 6.0                # this far from the angle backing wants: turn there standing still first
+LOOK_AGAIN = 3                     # marker not seen where it should be: look again this many times...
+LOOK_AGAIN_S = 1.5                 # ...this long apart (a camera still adjusting to dim light)
+AIM_FIRST_DEG = 6.0               # this far from the angle backing wants: turn there standing still first
 TOO_FAR_OFF_M = 0.08              # this close to the contacts and still this far off the line: stop, don't scrape
 
 
@@ -247,6 +249,25 @@ class Docking:
         med = lambda k: float(np.median([getattr(s, k) for s in seen]))
         return Sighting(med("ahead"), med("left"), med("facing_deg"), seen[0].markers, med("err_px"), med("seen_at_deg"))
 
+    async def _why_unseen(self) -> None:
+        """Log what the head camera's latest frame holds when the big marker wasn't found (numbers, no picture):
+        whether frames come at all, their size and brightness, and which sheet markers (if any) were found."""
+        f = self.brain.frames.get("head")
+        if not f or not f[0]:
+            log.info("docking: no head camera frames from the robot")
+            return
+        im = decode(f[0])
+        if im is None:
+            log.info("docking: a head camera frame that doesn't decode")
+            return
+        grey = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY) if im.ndim == 3 else im
+        det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50))
+        _, ids, rejected = det.detectMarkers(im)
+        log.info("docking: head frame %dx%d, %.1f s old, brightness %.0f (spread %.0f); markers found %s, "
+                 "%d marker-like shapes not read", im.shape[1], im.shape[0], time.monotonic() - f[1],
+                 float(grey.mean()), float(grey.std()), sorted(int(i) for i in ids.flatten()) if ids is not None
+                 else [], len(rejected))
+
     async def _rear_markers(self, n: int = 5) -> tuple[list[dict], tuple[int, int]] | None:
         """The markers in `n` fresh rear frames (only frames with at least two), and the picture's size."""
         out, size, t = [], None, time.monotonic() + 0.2
@@ -345,7 +366,16 @@ class Docking:
                 if why:
                     return why
                 continue
+            # Just arrived by the map and turned to face the dock: in dim light the head camera can still be
+            # adjusting its exposure, and five quick looks miss the marker (an evening run did; the same spot a few
+            # minutes later read it at once). Look again a few times before giving up.
+            for _ in range(LOOK_AGAIN):
+                if s is not None:
+                    break
+                await asyncio.sleep(LOOK_AGAIN_S)
+                s = await self._sight()
             if s is None:
+                await self._why_unseen()
                 return "can't see the dock marker with the head camera"
             # Near the picture's edge the camera model is least sure, and a sighting there can be far out (54
             # degrees off, a 42 px fit, once): face the marker first, and look again from straight on.

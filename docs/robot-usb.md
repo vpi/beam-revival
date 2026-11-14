@@ -171,6 +171,9 @@ another network with the same password (say, the router's 5 GHz name), change on
 | `beam-firstboot`, `beam-backup` | One-time: grow the partition, new SSH host keys, internal disk backup. |
 | tty1 autologin → `beam-kiosk` | The robot screen: Chromium in `cage`, showing `http://localhost:8080/robot`. |
 
+An extra USB webcam's own microphone must never stand in for the robot's. For the Razer Kiyo Pro, a udev rule
+(`/etc/udev/rules.d/70-beam.rules`) switches its microphone off at the USB level; its camera works as usual.
+
 ## Maintenance
 
 Use `ssh beam@beam.<your-tailnet>.ts.net`. Password logins are off; keys come from `beam.conf`.

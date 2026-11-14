@@ -106,11 +106,15 @@ _FILLER_WORDS = {"hey", "hi", "um", "uh", "oh", "so", "well", "rocky", "rockey",
 CONFIRM_S = 20.0
 
 
-def yes_or_no(text: str) -> str | None:
-    """"yes", "no", or None (something else: not an answer)."""
+def yes_or_no(text: str, place: str = "") -> str | None:
+    """"yes", "no", or None (something else: not an answer). place: the place he asked about; its name may come
+    with the yes ("OK, go to the dock")."""
     words = [w for w in re.findall(r"[a-z']+", text.lower()) if w not in _FILLER_WORDS]
     if any(w in _NO for w in words):
         return "no"
+    if place:
+        named = set(re.findall(r"[a-z']+", place.lower())) | {"to", "the"}
+        words = [w for w in words if w not in named]
     if (0 < len(words) <= 4 and all(w in _YES or w in _ALSO for w in words)
             and (any(w in _YES for w in words) or words == ["do", "it"])):
         return "yes"

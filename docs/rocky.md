@@ -80,7 +80,7 @@ you go on).
   half-made answer and answers your whole sentence. Once he has started speaking it's too late; say it again.
 - **Who's talking:** if the face recognition sees exactly one person it knows, he takes it that they spoke.
 - **On the brain host, nothing to the cloud:** Silero VAD finds speech, Smart Turn decides when you've
-  finished a sentence (rather than paused), and Whisper (`base.en`) turns it into text, all locally. The
+  finished a sentence (rather than paused), and Whisper (`small.en`) turns it into text, all locally. The
   sound is never stored. Only what was said **to him** goes to the AI service, as with typing; anything
   else is dropped and logged only as a word count.
 - **His own voice:** the robot page pauses the microphone while he speaks, so he doesn't answer himself.

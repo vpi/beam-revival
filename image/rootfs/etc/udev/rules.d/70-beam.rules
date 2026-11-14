@@ -6,5 +6,8 @@ SUBSYSTEM=="video4linux", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0006", ATT
 SUBSYSTEM=="video4linux", ATTRS{idVendor}=="25a1", ATTRS{idProduct}=="0007", ATTR{index}=="0", SYMLINK+="video-nav"
 # Cameras still in their bootloader (no firmware yet): load it. Runs at boot and after any camera reset.
 ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="25a1", ATTR{idProduct}=="4006|4007", TAG+="systemd", ENV{SYSTEMD_WANTS}+="beam-cameras.service"
+# Razer Kiyo Pro webcam (an extra camera): its built-in microphone is switched off at the USB level, so it
+# never becomes the robot's microphone. The camera (video interfaces) is untouched.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0e05", ATTR{bInterfaceClass}=="01", ATTR{authorized}="0"
 # Screen backlight: the motor server (user beamsrv) turns it off in sleep mode
 ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp beamsrv /sys%p/brightness", RUN+="/bin/chmod g+w /sys%p/brightness"

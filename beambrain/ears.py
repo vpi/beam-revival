@@ -42,8 +42,8 @@ MODELS = {
         "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfd/smart-turn-v3.2-cpu.onnx",
         "2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f"),
 }
-STT_MODEL = "base.en"                                       # ~0.3 s a sentence on the VM; small.en hears better, slower
-STT_REVISION = "3d3d5dee26484f91867d81cb899cfcf72b96be6c"   # Systran/faster-whisper-base.en, pinned
+STT_MODEL = "small.en"                                      # ~0.8 s a turn on the VM, hears accents better (base.en 0.3 s)
+STT_REVISION = "d1d751a5f8271d482d14ca55d9e2deeebbae577f"   # Systran/faster-whisper-small.en, pinned
 STT_PROMPT = "Hey Rocky. Rocky is a robot."                 # without it "Rocky" often comes out as "right"
 
 VAD_THRESHOLD = 0.4        # how sure the VAD must be that a chunk is speech
@@ -52,6 +52,7 @@ TURN_RECHECK_S = 0.6       # ...and again this often while the pause goes on
 TURN_THRESHOLD = 0.5       # how sure Smart Turn must be that you've finished
 TURN_MAX_SILENCE_S = 2.5   # finished anyway after this much quiet
 MIN_TURN_S = 0.4           # shorter: a click or a cough
+SHORT_TURN_S = 2.0         # a turn this short that Whisper's own filter empties is heard again without it
 MAX_TURN_S = 15.0
 
 
@@ -204,7 +205,15 @@ class Transcriber:
         self.prompt = STT_PROMPT
 
     def __call__(self, audio: np.ndarray) -> str:
-        segments, _ = self.model.transcribe(audio, language="en", beam_size=1, vad_filter=True,
+        text = self._text(audio, vad_filter=True)
+        if not text and len(audio) <= SHORT_TURN_S * SAMPLE_RATE:
+            # Whisper's own speech filter is stricter than ours and threw away whole short answers ("OK", 0.6 s):
+            # a quarter of all turns over three days. Our VAD already said it was speech: hear it without the filter.
+            text = self._text(audio, vad_filter=False)
+        return text
+
+    def _text(self, audio: np.ndarray, vad_filter: bool) -> str:
+        segments, _ = self.model.transcribe(audio, language="en", beam_size=1, vad_filter=vad_filter,
                                             initial_prompt=self.prompt)
         return " ".join(s.text.strip() for s in segments).strip()
 

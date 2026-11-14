@@ -113,6 +113,13 @@ def test_yes_or_no():
     for other in ("", "Thank you.", "please", "right", "yes I told you he was going to the kitchen later",
                   "it", "and then we went"):
         assert yes_or_no(other) is None, other
+    # The place he asked about may come with the yes; another place, or more words, doesn't count.
+    for yes in ("OK, go to the dock.", "Yes, the dock", "dock, yes", "Okay, go to the dock please"):
+        assert yes_or_no(yes, "dock") == "yes", yes
+    assert yes_or_no("go to the living room", "living room") == "yes"
+    assert yes_or_no("no, not the dock", "dock") == "no"
+    for other in ("dock", "OK go to the kitchen", "yes I told you to go to the dock later"):
+        assert yes_or_no(other, "dock") is None, other
 
 
 async def heard_brain(tmp_path):

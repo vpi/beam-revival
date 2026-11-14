@@ -579,7 +579,8 @@ class Brain:
         if time.monotonic() > until:
             log.info("places: no yes in time: trip not started")
             return False
-        answer = yes_or_no(text)
+        p = self.places.find(pid)
+        answer = yes_or_no(text, " ".join(p["names"]) if p else "")
         if answer is None:
             log.info("places: not a yes or no: trip not started")
             return False

@@ -233,6 +233,27 @@ def test_real_speech_pipeline_hears_a_spoken_question():
     assert heard[0][0] in ("wake", "chat") and heard[-1][0] == "chat" and "weekend" in heard[-1][1].lower(), heard
 
 
+def test_a_short_turn_whispers_filter_empties_is_heard_again():
+    """On the robot Whisper's own speech filter threw away whole short answers ("OK", 0.6 s, after "Going to the
+    dock. OK?"): a quarter of all turns over three days. A short turn it empties is transcribed again unfiltered;
+    a long one isn't (unfiltered, long noise is where Whisper makes words up)."""
+    from types import SimpleNamespace
+    from beambrain.ears import SHORT_TURN_S, Transcriber
+
+    class Model:
+        def __init__(self):
+            self.calls = []
+
+        def transcribe(self, audio, vad_filter, **_):
+            self.calls.append(vad_filter)
+            return ([] if vad_filter else [SimpleNamespace(text=" Okay.")]), None
+    stt = Transcriber.__new__(Transcriber)
+    stt.model, stt.prompt = Model(), ""
+    assert stt(np.zeros(int(0.6 * SAMPLE_RATE), np.float32)) == "Okay." and stt.model.calls == [True, False]
+    stt.model = Model()
+    assert stt(np.zeros(int((SHORT_TURN_S + 1) * SAMPLE_RATE), np.float32)) == "" and stt.model.calls == [True]
+
+
 async def test_name_alone_then_the_question_gets_one_answer(rig):
     pytest.importorskip("cv2")
     from beambrain.brain import Brain

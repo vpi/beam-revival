@@ -109,7 +109,7 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.6.2` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.6.3` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one
@@ -262,7 +262,7 @@ its own licence:
 - Face models **YuNet** and **SFace** from the [OpenCV model zoo](https://github.com/opencv/opencv_zoo),
   downloaded by `brain-host/install.sh`, pinned to a fixed revision and SHA-256 checked
 - Speech recognition on the brain host: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (MIT)
-  with the Whisper `base.en` model (MIT), [Silero VAD](https://github.com/snakers4/silero-vad) (MIT) and
+  with the Whisper `small.en` model (MIT), [Silero VAD](https://github.com/snakers4/silero-vad) (MIT) and
   [Smart Turn](https://github.com/pipecat-ai/smart-turn) v3.2 (BSD-2-Clause); the models download once, pinned
   and checked
 - Optional voice for Rocky: [Fish Audio](https://fish.audio) (a paid cloud service; bring your own key). The

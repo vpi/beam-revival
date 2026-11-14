@@ -156,6 +156,49 @@ def test_says_so_when_the_dock_is_out_of_sight(fake_cameras, tmp_path):
     assert result.startswith("can't see the dock marker with the head camera")
 
 
+def _arrived_by_map(monkeypatch, blind_frames):
+    """Out of sight at first; 'driving by the map' puts it in front of the dock, where the head camera then misses
+    the marker for `blind_frames` frames (still adjusting to dim light, like an evening run). Returns a counter."""
+    seen = {"n": 0, "map": False}
+
+    def sight(im, cam):
+        if not seen["map"]:
+            return None
+        seen["n"] += 1
+        return None if seen["n"] <= blind_frames else fake_world["w"].head_sighting()
+
+    async def come_by_map(self):
+        seen["map"] = True
+        return None
+    monkeypatch.setattr(dock, "sight_dock", sight)
+    monkeypatch.setattr(dock.Docking, "_come_by_map", come_by_map)
+    monkeypatch.setattr(dock, "LOOK_AGAIN_S", 0.05)
+    return seen
+
+
+fake_world = {}
+
+
+def test_arriving_by_map_it_looks_again_while_the_camera_adjusts(fake_cameras, tmp_path, monkeypatch):
+    asyncio.run(_teach_then(fake_cameras, tmp_path, {}))
+    seen = _arrived_by_map(monkeypatch, blind_frames=7)       # the first look (5 frames) and part of the next
+    w = World(1.8, 0.2, 180)
+    fake_world["w"] = w
+    result, _ = asyncio.run(run_docking(w, fake_cameras, tmp_path))
+    assert result == "docked: on the charger"
+    assert seen["n"] > 7
+
+
+def test_arriving_by_map_it_gives_up_if_the_marker_never_shows(fake_cameras, tmp_path, monkeypatch):
+    asyncio.run(_teach_then(fake_cameras, tmp_path, {}))
+    seen = _arrived_by_map(monkeypatch, blind_frames=10_000)
+    w = World(1.8, 0.2, 180)
+    fake_world["w"] = w
+    result, _ = asyncio.run(run_docking(w, fake_cameras, tmp_path))
+    assert result == "can't see the dock marker with the head camera"
+    assert seen["n"] == 5 * (1 + dock.LOOK_AGAIN)              # the first look and LOOK_AGAIN more, then it gives up
+
+
 def test_jumpy_angle_readings_still_end_square(fake_cameras, tmp_path):
     """Run 2 on the real robot docked 10-15 degrees crooked: the sheet's angle read differently on every look."""
     phone = {"head_noise_deg": 8.0}
