@@ -57,13 +57,23 @@ def sensor(**kw) -> MatrixSensor:
     return MatrixSensor("/nonexistent", **kw)
 
 
+def floor_reading(height_m, tilt_deg, r, c) -> int:
+    """What cell (r, c) reads for a flat floor: depth along the sensor's axis (mm), worked out on its own here."""
+    az, el, t = math.radians((c - 3.5) * 7.5), math.radians((3.5 - r) * 7.5), math.radians(tilt_deg)
+    f = math.cos(el) * math.cos(az)                      # the direction's share along the axis
+    down = f * math.sin(t) - math.sin(el) * math.cos(t)  # how far down 1 m along the cell's line goes
+    return round(height_m / down * f * 1000)
+
+
 def test_the_floor_is_not_an_obstacle():
     s = sensor(height_m=0.10, tilt_deg=0.0)
-    # The bottom row looks 26.25 degrees down: from 10 cm up it meets the floor 0.226 m along.
-    floor = round(0.10 / math.sin(math.radians(26.25)) * 1000)
-    assert s.nearest([[cell_mm(v) for v in r] for r in grid(**{f"r7c{c}": floor for c in range(8)})]) is None
-    # A shoe 40 cm ahead, straight in front (rows 3-4, the middle columns): counted.
-    assert abs(s.nearest([[cell_mm(v) for v in r] for r in grid(r4c3=400, r4c4=400)]) - 0.40 * math.cos(math.radians(3.75)) ** 2) < 0.01
+    # The bottom row looks 26.25 degrees down: from 10 cm up it meets the floor 0.20 m ahead, and reads that
+    # (depth), a little less in the outer columns.
+    floor = {f"r7c{c}": floor_reading(0.10, 0.0, 7, c) for c in range(8)}
+    assert floor["r7c3"] == 202 and floor["r7c0"] == 182
+    assert s.nearest([[cell_mm(v) for v in r] for r in grid(**floor)]) is None
+    # A shoe 40 cm ahead, straight in front (rows 3-4, the middle columns): counted, at the depth it reads.
+    assert abs(s.nearest([[cell_mm(v) for v in r] for r in grid(r4c3=400, r4c4=400)]) - 0.40) < 0.005
     # The outer column (26 degrees off) at 80 cm: 0.35 m to the side, outside the robot's path...
     assert s.nearest([[cell_mm(v) for v in r] for r in grid(r4c0=800)]) is None
     # ...but at 40 cm it's 0.18 m to the side: in front of a wheel.
@@ -72,11 +82,11 @@ def test_the_floor_is_not_an_obstacle():
 
 def test_tilted_down_the_floor_comes_closer_and_still_isnt_an_obstacle():
     s = sensor(height_m=0.10, tilt_deg=15.0)
-    # The middle rows (3.75 degrees down + 15) meet the floor about 0.31 m along.
-    d = round(0.10 / math.sin(math.radians(18.75)) * 1000)
-    assert s.nearest([[cell_mm(v) for v in r] for r in grid(**{f"r4c{c}": d for c in range(8)})]) is None
+    # The middle rows (3.75 degrees down + 15) meet the floor about 0.30 m ahead.
+    row = {f"r4c{c}": floor_reading(0.10, 15.0, 4, c) for c in range(8)}
+    assert s.nearest([[cell_mm(v) for v in r] for r in grid(**row)]) is None
     # A third of that: something 7 cm tall standing on the floor, in the way.
-    assert s.nearest([[cell_mm(v) for v in r] for r in grid(r4c4=d // 3)]) is not None
+    assert s.nearest([[cell_mm(v) for v in r] for r in grid(r4c4=row["r4c4"] // 3)]) is not None
 
 
 def test_behind_the_front_edge_and_flipped():
@@ -85,7 +95,7 @@ def test_behind_the_front_edge_and_flipped():
     assert s.grid[3][7] == 800 and s.grid[3][0] is None
     assert s.gap_m is None                        # 26 degrees off at 0.8 m: outside the path
     s._on_data(frame_text(grid(r3c3=500)) * 3)
-    assert abs(s.gap_m - (0.5 * math.cos(math.radians(3.75)) ** 2 - 0.05)) < 0.005
+    assert abs(s.gap_m - (0.5 - 0.05)) < 0.005           # level, a reading is the distance ahead
 
 
 # As first set on the robot: 25 cm up, 8 degrees down, on carpet. The floor, as it read there.
@@ -100,6 +110,27 @@ def test_on_the_robot_the_floor_is_floor_even_where_it_reads_short():
     assert s.nearest(cells(**FLOOR)) is None
     # The bottom corner cells read short at times (seen: 381 mm with its neighbours at 430).
     assert s.nearest(cells(**{**FLOOR, "r7c7": 381, "r7c0": 381})) is None
+
+
+# Re-mounted (2026-11-14): 24.5 cm up, 7.5 degrees down (from the floor itself), on carpet. As it read there.
+REMOUNTED = dict(height_m=0.245, tilt_deg=7.5)
+FLOOR_NOW = {f"r{r}c{c}": v for r, row in ((5, [699, 715, 755, 777, 762, 739, 747, 737]),
+                                         (6, [503, 510, 517, 519, 521, 528, 523, 509]),
+                                         (7, [388, 394, 399, 405, 405, 398, 394, 382])) for c, v in enumerate(row)}
+
+
+def test_the_floor_reads_as_depth_outer_columns_shorter():
+    """Read as depth the floor fits every cell within a few per cent, the outer columns reading shorter than the
+    middle; so with no floor learnt it isn't taken for an obstacle anywhere, and a shoe still is."""
+    for k, mm in FLOOR_NOW.items():
+        assert abs(floor_reading(0.245, 7.5, int(k[1]), int(k[3])) - mm) / mm < 0.07, k
+    for r in (6, 7):                                          # read along the line, the outer ones would be longer
+        assert FLOOR_NOW[f"r{r}c0"] < FLOOR_NOW[f"r{r}c3"] and FLOOR_NOW[f"r{r}c7"] < FLOOR_NOW[f"r{r}c4"]
+    s = sensor(**REMOUNTED)
+    cells = lambda **kw: [[cell_mm(v) for v in r] for r in grid(**kw)]
+    assert s.nearest(cells(**FLOOR_NOW)) is None
+    shoe = s.nearest(cells(**{**FLOOR_NOW, "r5c3": 500}))     # row 5 meets a 10 cm shoe's front about 0.5 m ahead
+    assert shoe is not None and 0.45 < shoe < 0.52
 
 
 def test_each_cell_goes_by_the_middle_of_its_last_three():
@@ -163,7 +194,7 @@ async def test_found_among_ports_by_its_frames(monkeypatch):
             if s.present:
                 break
         assert s.present and s.port.path == real and other in s.picker.rejected
-        assert 0.75 < s.snapshot()["m"] < 0.8
+        assert abs(s.snapshot()["m"] - 0.8) < 0.005
     finally:
         await s.stop()
         for fd in (other_m, other_s, real_m, real_s):

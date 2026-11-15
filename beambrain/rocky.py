@@ -93,6 +93,21 @@ When someone in the room asks, go_to doesn't move you at once: you ask them to s
 they ask again. Never say you will go somewhere next."""
 
 
+ARM = """\
+- You have one arm (an Eridian has five). With the arm tool you can do these gestures: <<GESTURES>>. Use it only \
+when someone asks you to, never on your own. Each one starts and ends with the arm folded along your body; anyone \
+touching your controls stops it. After the tool answers, say in a few words that you did it (or honestly why not)."""
+
+
+def arm_tool(gestures: list[str]) -> dict:
+    return {"type": "function", "function": {
+        "name": "arm",
+        "description": "Move your arm in one of your gestures, from folded and back to folded. Answers at once.",
+        "parameters": {"type": "object", "properties": {
+            "gesture": {"type": "string", "enum": gestures, "description": "Which gesture."}},
+            "required": ["gesture"]}}}
+
+
 def confirm_question(place: str) -> str:
     """What he says before a trip asked for in the room. Fixed words, not the AI's."""
     return f"Going to {place}. OK?"
@@ -133,10 +148,14 @@ know people's names only from your face recognition (below, when it knows someon
 - Be kind about people. Describe what they hold or do, not their bodies."""
 
 
-def system_prompt(personality: str, eyes: bool, places: list[str] | None = None) -> str:
+def system_prompt(personality: str, eyes: bool, places: list[str] | None = None,
+                  gestures: list[str] | None = None) -> str:
     """The whole system prompt: his personality (the editable part; empty = the default), then the fixed rest.
-    places: the names he may drive to (None: he can't drive in this conversation)."""
+    places: the names he may drive to (None: he can't drive in this conversation). gestures: his arm's (None: no
+    arm, or not for this person)."""
     moving = MOVING.replace("<<PLACES>>", ", ".join(places)) if places else NO_MOVING
+    if gestures:
+        moving += "\n" + ARM.replace("<<GESTURES>>", ", ".join(gestures))
     rules = RULES.replace("<<SEEING>>", EYES if eyes else BLIND).replace("<<MOVING>>", moving)
     return f"{personality.strip() or PERSONALITY}\n\n{SETTING}\n\n{rules}"
 
@@ -230,12 +249,14 @@ def presence_note(at: dict) -> str:
 
 
 class Rocky:
-    def __init__(self, llm: LLM, temperature: float = 0.7, home=None, eyes=None, trips=None):
+    def __init__(self, llm: LLM, temperature: float = 0.7, home=None, eyes=None, trips=None, arm=None):
         """home: a beambrain.home.HomeAssistant, or None for no home control.
         eyes: async (camera: "head" | "floor") -> base64 JPEG or None; None = no sight.
         trips: the brain's named places: .names() -> [str], async .go(name, spoken) -> (started, text); None = he
-        can't drive himself."""
+        can't drive himself.
+        arm: the robot's arm gestures: .names() -> [str] ([] = no arm), async .play(name) -> (ok, text)."""
         self.llm, self.temperature, self.home, self.eyes, self.trips = llm, temperature, home, eyes, trips
+        self.arm = arm
         self.personality = PERSONALITY      # changed from the driving page (brain.py remembers it)
         self.history: list[dict] = []
         self.last_at = 0.0
@@ -252,7 +273,9 @@ class Rocky:
         user = {"role": "user", "content": f"{sender or ('Someone' if spoken else 'Driver')}: {text}"}
         # Driving himself: for the same people who may switch things (the room, the household's drivers).
         places = self.trips.names() if self.trips is not None and may_control else None
-        prompt = system_prompt(self.personality, self.eyes is not None, places)
+        # His arm: for the same people (the server still refuses while a person is at the controls).
+        gestures = (self.arm.names() or None) if self.arm is not None and may_control else None
+        prompt = system_prompt(self.personality, self.eyes is not None, places, gestures)
         system = f"{prompt}\n{situation(sender, in_view or [], spoken)}"
         now = getattr(self.trips, "now", None)
         trip = now() if callable(now) else None
@@ -271,7 +294,10 @@ class Rocky:
         tools = [LOOK_TOOL] if self.eyes else []
         if places:
             tools.append(go_tool(places))
+        if gestures:
+            tools.append(arm_tool(gestures))
         went = False
+        gestured = False
         confirm: str | None = None     # a spoken trip he must ask about first: the place's name
         home_tools = []
         if self.home is not None:
@@ -330,6 +356,17 @@ class Rocky:
                                     **({"asked": True} if confirm is not None else {})})
                     log.info("go_to -> %s", "asking first" if confirm is not None else
                              "started" if ok else "not started")
+                elif call["name"] == "arm" and gestures:
+                    name = str(call["arguments"].get("gesture", ""))
+                    if gestured:
+                        ok, out = False, "Not done: one gesture at a time."
+                    elif name not in gestures:
+                        ok, out = False, f"Not done: no gesture {name!r}."
+                    else:
+                        gestured = True
+                        ok, out = await self.arm.play(name)
+                    actions.append({"tool": "arm", "args": {"gesture": name}, "ok": ok})
+                    log.info("arm gesture %s -> %s", name if name in gestures else "?", "started" if ok else "not done")
                 elif any(t["function"]["name"] == call["name"] for t in home_tools):
                     ok, out = await self.home.call(session, call["name"], call["arguments"])
                     actions.append({"tool": call["name"], "args": call["arguments"], "ok": ok})

@@ -55,6 +55,11 @@
                font-size: 3.4vmin; font-weight: 700; padding: 1.4vmin 2vmin; display: none; z-index: 5; }
   .ai-banner small { display: block; font-size: 2.4vmin; font-weight: 500; opacity: .9; }
   .ai-banner.on { display: block; }
+  /* The arm moving: who moves it, a person (green) or the AI (purple), at the bottom of the screen. */
+  .arm-banner { position: fixed; bottom: 0; left: 0; right: 0; color: #fff; text-align: center; font-size: 3.4vmin;
+                font-weight: 700; padding: 1.4vmin 2vmin; display: none; z-index: 5; background: #1f9d55; }
+  .arm-banner.ai { background: var(--ai); }
+  .arm-banner.on { display: block; }
   /* Sleep mode: nothing on screen (the backlight is off too), cameras and microphone closed. */
   .sleep { position: fixed; inset: 0; background: #000; z-index: 10; display: none; }
   body.asleep .sleep { display: block; }
@@ -76,6 +81,7 @@
   </div>
   <div id="bubble" class="bubble"></div>
   <div id="aiBanner" class="ai-banner"></div>
+  <div id="armBanner" class="arm-banner"></div>
   <video id="self" class="selfview" autoplay muted playsinline></video>
   <div id="error" class="error"></div>
   <div id="setup" class="setup"></div>
@@ -149,7 +155,17 @@
         });
       } catch (e) { console.warn("nav camera unavailable", e); }
     }
-    return { head, nav, labels: { head: cams.indexOf(headCam), nav: cams.indexOf(navCam), roles,
+    // The arm camera (a Razer Kiyo Pro looking at the arm), if there is one: video only, never its microphone.
+    const armCam = byRole("arm") || cams.find((c) => /kiyo/i.test(c.label) && c !== headCam && c !== navCam);
+    let arm = null;
+    if (armCam && armCam !== headCam && armCam !== navCam) {
+      try {
+        arm = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: armCam.deviceId }, width: 640, height: 360, frameRate: 15 },
+        });
+      } catch (e) { console.warn("arm camera unavailable", e); }
+    }
+    return { head, nav, arm, labels: { head: cams.indexOf(headCam), nav: cams.indexOf(navCam), roles,
                                   found: Object.keys(found).map((r) => `${r}=#${cams.indexOf(found[r])}`).join(" ") || "none",
                                   all: cams.map((c) => c.label) } };
   }
@@ -248,6 +264,10 @@
 
     for (const t of media.head.getTracks()) pc.addTrack(t, media.head);   // head video + mic (sendrecv audio)
     if (media.nav) for (const t of media.nav.getVideoTracks()) pc.addTrack(t, media.nav);
+    if (media.arm) for (const t of media.arm.getVideoTracks()) {
+      pc.addTransceiver(t, { direction: "sendonly", streams: [media.arm],
+                             sendEncodings: [{ maxFramerate: 15, maxBitrate: 600000 }] });
+    }
     if (!media.head.getAudioTracks().length) pc.addTransceiver("audio", { direction: "recvonly" });
     // Rear view slot, always negotiated: the phone's camera is switched in and out without renegotiating.
     peer.rear = pc.addTransceiver("video", { direction: "sendonly", streams: [rearStream],
@@ -269,7 +289,8 @@
     };
     await pc.setLocalDescription(await pc.createOffer());
     sendTo(id, { kind: "offer", sdp: pc.localDescription, rear: !!rearTrack,
-                 streams: { head: media.head.id, nav: media.nav ? media.nav.id : null, rear: rearStream.id } });
+                 streams: { head: media.head.id, nav: media.nav ? media.nav.id : null,
+                            arm: media.arm ? media.arm.id : null, rear: rearStream.id } });
     render();
     updateRear();
   }
@@ -296,7 +317,7 @@
       }
     });
     const cap = {};
-    for (const [name, s] of [["head", media && media.head], ["nav", media && media.nav]]) {
+    for (const [name, s] of [["head", media && media.head], ["nav", media && media.nav], ["arm", media && media.arm]]) {
       const t = s && s.getVideoTracks()[0];
       if (t) { const g = t.getSettings(); cap[name] = `${g.width}x${g.height}@${Math.round(g.frameRate || 0)}`; }
     }
@@ -743,6 +764,11 @@
       const b = s.board;
       $("battery").textContent = b && b.battery_percent != null ? `battery ${b.battery_percent.toFixed(0)}%${b.charging ? " · charging" : ""}` : "";
       renderSetup(s.setup, s.link);
+      const by = s.arm && s.arm.state === "moving" ? s.arm.by : null, ab = $("armBanner");
+      ab.textContent = by === "brain" ? "🤖 AI is moving the arm" : by === "sleep" ? "🦾 Stowing the arm for sleep"
+        : by ? "🦾 A driver is moving the arm" : "";
+      ab.classList.toggle("on", !!by);
+      ab.classList.toggle("ai", by === "brain");
       const sleeping = !!(s.sleep && s.sleep.asleep);
       if (sleeping && !asleep) enterSleep();
       else if (!sleeping && asleep) location.reload();   // woken: start fresh, cameras and all
@@ -782,7 +808,7 @@
     setFrameRate(0);
     for (const id of [...peers.keys()]) closePeer(id);
     if (ws) ws.close();
-    for (const s of [media && media.head, media && media.nav]) if (s) s.getTracks().forEach((t) => t.stop());
+    for (const s of [media && media.head, media && media.nav, media && media.arm]) if (s) s.getTracks().forEach((t) => t.stop());
     media = null;
     $("self").srcObject = null;
     navVideo.srcObject = null;

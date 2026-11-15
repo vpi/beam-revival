@@ -7,11 +7,11 @@ import beamctl.server as server
 from beamctl.server import camera_roles, cameras_in_use
 
 
-def fake_camera(sysfs, usb, node, index, pid):
+def fake_camera(sysfs, usb, node, index, pid, vid="25a1"):
     iface = usb / f"{pid}-1:1.0"
     iface.mkdir(parents=True, exist_ok=True)       # videoN/device points at the USB interface
     dev = iface.parent
-    (dev / "idVendor").write_text("25a1\n")
+    (dev / "idVendor").write_text(f"{vid}\n")
     (dev / "idProduct").write_text(f"{pid}\n")
     d = sysfs / f"video{node}"
     d.mkdir()
@@ -28,6 +28,15 @@ def test_roles_follow_device_order_not_load_order(tmp_path):
     fake_camera(sysfs, usb / "b", 2, 0, "0006")
     fake_camera(sysfs, usb / "b", 3, 1, "0006")
     assert camera_roles(str(sysfs)) == ["nav", "head"]
+
+
+def test_the_kiyo_is_the_arm_camera_and_others_are_other(tmp_path):
+    sysfs, usb = tmp_path / "video4linux", tmp_path / "usb"
+    sysfs.mkdir()
+    fake_camera(sysfs, usb / "a", 0, 0, "0006")
+    fake_camera(sysfs, usb / "k", 2, 0, "0e05", vid="1532")      # Razer Kiyo Pro
+    fake_camera(sysfs, usb / "w", 4, 0, "0825", vid="046d")      # some webcam
+    assert camera_roles(str(sysfs)) == ["head", "arm", "other"]
 
 
 def test_no_cameras(tmp_path):

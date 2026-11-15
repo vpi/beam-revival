@@ -218,6 +218,10 @@ class Brain:
                 listener(m)
         elif kind == "denied":
             self.human_took_over.set()      # a person is driving: the AI must stand down
+        elif kind == "arm_result":
+            fut = getattr(self, "_arm_waiting", None)
+            if fut is not None and not fut.done():
+                fut.set_result((bool(m.get("ok")), str(m.get("reason") or "")))
         elif kind == "brain_cmd":
             await self.on_command(m.get("data") or {})
 
@@ -462,6 +466,28 @@ class Brain:
         import types
         return types.SimpleNamespace(names=lambda: self.places.all_names(), go=self.go_to_place,
                                      ask=self.ask_trip, now=self.current_trip, people=self.people_at)
+
+    def arm_tools(self):
+        """What Rocky's arm tool uses (rocky.py): the robot's gestures (from its status; [] without an arm)."""
+        import types
+
+        def names() -> list[str]:
+            arm = (self.telemetry or {}).get("arm")
+            return list(arm.get("gestures") or []) if arm and arm.get("present") else []
+        return types.SimpleNamespace(names=names, play=self.play_gesture)
+
+    async def play_gesture(self, name: str) -> tuple[bool, str]:
+        """Ask the robot to play an arm gesture; its answer (it refuses while a person is at the controls)."""
+        loop = asyncio.get_running_loop()
+        self._arm_waiting = fut = loop.create_future()
+        try:
+            await self.send({"type": "arm_gesture", "name": name})
+            ok, why = await asyncio.wait_for(fut, 3.0)
+        except asyncio.TimeoutError:
+            return False, "Not done: the robot didn't answer."
+        finally:
+            self._arm_waiting = None
+        return ok, ("Doing it now." if ok else f"Not done: {why}.")
 
     def current_trip(self) -> str | None:
         """What the AI driver is doing right now ("going to “kitchen”", "docking", ...), or None."""
@@ -1072,7 +1098,7 @@ def main() -> None:
             else:
                 log.warning("--home-url given but no ~/beam-brain/ha.key; no home control")
         brain.rocky = Rocky(LLM(ai["model"], ai["key"]), home=home, eyes=None if args.no_eyes else brain.look,
-                            trips=brain.trips())
+                            trips=brain.trips(), arm=brain.arm_tools())
         fish_key = Path(args.data).parent / "fish.key"
         if fish_key.exists() and fish_key.read_text().strip():
             from .speech import FishVoice

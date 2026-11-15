@@ -246,12 +246,39 @@ def test_a_short_turn_whispers_filter_empties_is_heard_again():
 
         def transcribe(self, audio, vad_filter, **_):
             self.calls.append(vad_filter)
-            return ([] if vad_filter else [SimpleNamespace(text=" Okay.")]), None
+            return ([] if vad_filter else [SimpleNamespace(text=" Okay.", no_speech_prob=0.07)]), None
     stt = Transcriber.__new__(Transcriber)
     stt.model, stt.prompt = Model(), ""
     assert stt(np.zeros(int(0.6 * SAMPLE_RATE), np.float32)) == "Okay." and stt.model.calls == [True, False]
     stt.model = Model()
     assert stt(np.zeros(int((SHORT_TURN_S + 1) * SAMPLE_RATE), np.float32)) == "" and stt.model.calls == [True]
+
+
+def test_noise_heard_again_unfiltered_isnt_taken_for_words():
+    """Heard again without Whisper's filter, a short noise (a hiss, a clatter, the robot moving) came out as the
+    prompt: "Rocky is a robot.", and Rocky started talking to nobody. Whisper scores those as likely not speech
+    (0.63 and up; real short answers 0.23 at most): dropped. And the prompt's own sentence is never taken as said."""
+    from types import SimpleNamespace
+    from beambrain.ears import Transcriber
+
+    class Model:
+        def __init__(self, text, no_speech):
+            self.seg = SimpleNamespace(text=text, no_speech_prob=no_speech)
+
+        def transcribe(self, audio, vad_filter, **_):
+            return ([] if vad_filter else [self.seg]), None
+    stt = Transcriber.__new__(Transcriber)
+    stt.prompt = ""
+    short = np.zeros(int(0.8 * SAMPLE_RATE), np.float32)
+    for text, nsp in ((" Rocky is a robot.", 0.78), (" Go to the kitchen.", 0.7), (" Hey Rocky.", 0.66)):
+        stt.model = Model(text, nsp)
+        assert stt(short) == "", text
+    stt.model = Model(" Okay.", 0.23)                    # the quietest real "OK" measured
+    assert stt(short) == "Okay."
+    stt.model = Model(" Rocky is a robot.", 0.1)         # even when Whisper is sure of it
+    assert stt(short) == ""
+    stt.model = Model(" Hey Rocky. Rocky is a robot.", 0.1)
+    assert stt(short) == "Hey Rocky."
 
 
 async def test_name_alone_then_the_question_gets_one_answer(rig):

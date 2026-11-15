@@ -38,6 +38,10 @@ Tested on a real Beam+ (October 2026), running from a USB stick, with the robot'
   driving page a live top view of the surroundings and an **obstacle stop** that slows down and stops
   forward driving before it hits something 5 cm or taller, and drives over mats, thresholds and flat rugs
   ([docs/sensors.md](docs/sensors.md))
+- Optional, experimental **robot arm** (Waveshare RoArm-M2-S on the stand): an Arm card on the driving page
+  (hold to move each joint, Stow, a light, the arm camera's view), gestures you can teach it, and "hey Rocky,
+  wave"; the robot drives only with the arm stowed, and any person's input stops an AI move
+  ([docs/arm.md](docs/arm.md))
 - Experimental, on a separate Linux computer (the "brain"): **face recognition** with spoken greetings
   ([docs/brain.md](docs/brain.md)), and **Rocky**, a personality with an animated face on the robot screen
   who answers out loud, typed to by drivers or spoken to in the room with "hey Rocky" (or a wave); he looks
@@ -104,12 +108,13 @@ default stick is the bare minimum; nothing extra runs unless you enable it.
 | Face recognition and spoken greetings | **experimental**, tried on a Beam+ | a separate Linux computer (the "brain") | `BRAIN_KEY`, see [docs/brain.md](docs/brain.md) |
 | Rocky: animated face, typed chat from drivers, "hey Rocky" or a wave in the room (only while nobody drives), sight when asked, Home Assistant control, editable personality | **experimental**, tried on a Beam+ | the brain, an AI provider API key; optional Fish Audio key for his voice, optional Home Assistant | see [docs/rocky.md](docs/rocky.md) |
 | Floor map from the lidar, docking from anywhere, named places ("hey Rocky, go to the kitchen") | **experimental**, tried on a Beam+ | the brain, the lidar, the phone panel (its rear camera docks), the printed dock marker sheet | see [docs/ai-driving.md](docs/ai-driving.md) |
+| Robot arm: Arm card, arm camera, light, gestures (taught too), "hey Rocky, wave" | **experimental**, tried on a Beam+ | a Waveshare RoArm-M2-S on 12 V from the robot, USB to the head hub; optional Razer Kiyo Pro as the arm camera | `ARM_DEVICE` (and `LIDAR_DEVICE`), see [docs/arm.md](docs/arm.md) |
 | AI driving | **experimental**, simulator only so far | the brain, plus an AI provider API key | see [docs/ai-driving.md](docs/ai-driving.md) |
 
 ## Versions
 
 Releases are git tags (`v1.0`, `v1.1`…) with notes on GitHub's Releases page. **Use a release for a
-robot you rely on**: `git checkout v1.6.3` before `sudo image/build-image.sh`. The latest code on `main`
+robot you rely on**: `git checkout v1.7` before `sudo image/build-image.sh`. The latest code on `main`
 is for trying new things. The driving page shows which version a robot runs (Link → Software).
 
 A tip from our own setup: keep two sticks, a **stable** one built from a release, and a **lab** one

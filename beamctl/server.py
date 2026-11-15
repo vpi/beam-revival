@@ -34,6 +34,7 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from . import protocol as p
+from .arm import Arm, ArmController
 from .lidar import Lidar
 from .matrixtof import MatrixSensor
 from .rangefinder import RangeSensors
@@ -132,6 +133,11 @@ class Config:
                                               # guessed 0.25: a wall it fits beside counted as 0 m ahead)
     lidar_to_front_m: float = 0.06       # measured on ours: its centre 6 cm behind the front edge
     lidar_side_m: float = 0.0            # where the lidar sits off the robot's centre line, + to its right (ours: 3 cm left)
+    # The robot arm (beamctl/arm.py): its port by name (never looked for), or None for none. With an arm the
+    # wheels turn only while it's stowed (slowly while where it is isn't known).
+    arm_device: str | None = None
+    arm_speed_deg: float = 20.0
+    arm_unknown_angular: float = 0.5     # rad/s: turning while the arm's pose isn't known
 
 
 OBSTACLE_MIN_SPEED = 0.03   # m/s: an obstacle-limited forward speed below this is a stop (no crawling at
@@ -139,6 +145,7 @@ OBSTACLE_MIN_SPEED = 0.03   # m/s: an obstacle-limited forward speed below this 
 
 PRIORITY_BRAIN = 0          # autonomy: drives only while no human is driving
 PRIORITY_HUMAN = 1          # a person on a driving page always wins
+BRAIN_ARM_QUIET_S = 10.0    # the AI may move the arm only this long after a person last touched a control
 
 
 @dataclass
@@ -151,6 +158,7 @@ class DriveState:
     estop: bool = False
     estop_by: object | None = None              # the page that pressed STOP (None once it has left)
     estop_driver: object | None = None          # whoever was driving when it was pressed
+    last_human_input: float = -math.inf         # a person's last drive or arm control (the AI's arm waits on it)
 
 
 @dataclass
@@ -180,9 +188,23 @@ class MotorController:
         self._stopping = False
         self._light_pending = True               # (re)send the charging light colour at the next cycle
         self.sleep = SleepManager(cfg.sleep_hours, Backlight(cfg.backlight), cfg.sleep_state)
+        # Ports one part of this server uses, so no other part opens them (the arm's first: it's never looked
+        # for, and its USB chip is the lidar's).
+        self.claimed: set[str] = set()
+        self.arm: ArmController | None = None
+        if cfg.arm_device:
+            try:
+                taught = (os.path.join(os.path.dirname(cfg.sleep_state), "arm-gestures.json")
+                          if cfg.sleep_state else None)
+                self.arm = ArmController(Arm(cfg.arm_device, self.claimed), speed_deg=cfg.arm_speed_deg,
+                                         wheels_moving=lambda: not self.standing_still(), taught_file=taught)
+            except ValueError as e:                  # never let a setting stop the motor server
+                log.error("arm left out: %s", e)
+        self._arm_parking: asyncio.Task | None = None
         self.range = self._range_sensors(cfg.range_device) if cfg.range_device else None
         self.lidar = (Lidar(cfg.lidar_device, cfg.lidar_mask, cfg.lidar_rotation,
-                            should_spin=lambda: not self.sleep.asleep) if cfg.lidar_device else None)
+                            should_spin=lambda: not self.sleep.asleep, claimed=self.claimed)
+                      if cfg.lidar_device else None)
         floor_file = os.path.join(os.path.dirname(cfg.sleep_state), "matrix-floor.json") if cfg.sleep_state else None
         self.matrix = (MatrixSensor(cfg.matrix_device, cfg.matrix_height_m, cfg.matrix_tilt_deg, cfg.matrix_to_front_m,
                                     cfg.robot_half_width_m, cfg.matrix_flip, floor_file=floor_file)
@@ -225,9 +247,64 @@ class MotorController:
         d.target_linear = _clamp(linear, self.cfg.max_linear)
         d.target_angular = _clamp(angular, self.cfg.max_angular)
         d.last_input = now
+        if priority == PRIORITY_HUMAN:
+            self._human_input(now)
         return True
 
+    def _human_input(self, now: float) -> None:
+        """A person touched a control: the AI's arm move, if any, stops at once (human override is absolute)."""
+        self.drive.last_human_input = now
+        if self.arm is not None and self.arm.moving and self.arm.by_kind == "brain":
+            self.arm.hold("a person took over")
+
+    def arm_command(self, m: dict, owner: object, priority: int = PRIORITY_HUMAN) -> tuple[bool, str]:
+        """An arm order from a page: "arm_jog" {joint, dir} (held button), "arm_joint" {joint, deg}, "arm_stow",
+        "arm_stop", "arm_let_go", "arm_hold".
+        Whoever is driving has the arm too: refused while another driver is active."""
+        arm = self.arm
+        if arm is None:
+            return False, "there's no arm"
+        kind = m.get("type")
+        d, now = self.drive, time.monotonic()
+        if kind == "arm_stop":                         # anyone may freeze it, like STOP
+            if priority == PRIORITY_HUMAN:
+                d.last_human_input = now
+            arm.hold("stopped from a page" if priority == PRIORITY_HUMAN else "the AI stopped it")
+            return True, "arm stopped"
+        if priority == PRIORITY_BRAIN and now - d.last_human_input < BRAIN_ARM_QUIET_S:
+            return False, "a person is at the controls"
+        if d.owner is not None and d.owner is not owner and now - d.last_input < self.cfg.deadman_s \
+                and priority <= d.owner_priority:
+            return False, "another driver has control"
+        if priority == PRIORITY_HUMAN:
+            self._human_input(now)
+        if kind == "arm_gesture":
+            return arm.gesture(str(m.get("name")), owner, "brain" if priority == PRIORITY_BRAIN else "human")
+        if priority == PRIORITY_HUMAN and kind == "arm_record":
+            return arm.record(bool(m.get("on")), owner)
+        if priority == PRIORITY_HUMAN and kind == "arm_save":
+            return arm.save_taught(str(m.get("name") or ""), owner)
+        if priority == PRIORITY_HUMAN and kind == "arm_forget":
+            return arm.forget_taught(str(m.get("name") or ""), owner)
+        if kind == "arm_light":
+            return arm.set_light(m.get("level"), owner)
+        if kind == "arm_jog":
+            return arm.jog(str(m.get("joint")), int(m.get("dir")), owner,
+                           "brain" if priority == PRIORITY_BRAIN else "human")
+        if kind == "arm_joint":
+            return arm.move_joint(str(m.get("joint")), float(m.get("deg")), owner,
+                                  "brain" if priority == PRIORITY_BRAIN else "human")
+        if kind == "arm_stow":
+            return arm.stow(owner, "brain" if priority == PRIORITY_BRAIN else "human")
+        if kind == "arm_let_go":
+            return arm.let_go(owner)
+        if kind == "arm_hold":
+            return arm.hold_again(owner)
+        return False, "unknown arm order"
+
     def release(self, owner: object) -> None:
+        if self.arm is not None:
+            self.arm.left(owner)
         if self.drive.owner is owner:
             self.drive.owner = None
             self.drive.target_linear = self.drive.target_angular = 0.0
@@ -317,6 +394,8 @@ class MotorController:
                 d.estop, d.estop_by, d.estop_driver = True, owner, d.owner
                 log.warning("E-STOP engaged by %s", who)
             d.target_linear = d.target_angular = 0.0
+            if self.arm is not None:
+                self.arm.set_estop(True)             # the arm freezes too, and takes no orders until released
             return True
         if not d.estop:
             return True
@@ -324,6 +403,8 @@ class MotorController:
             log.warning("E-stop release by %s refused: not the page that pressed it, nor the driver then", who)
             return False
         d.estop, d.estop_by, d.estop_driver = False, None, None
+        if self.arm is not None:
+            self.arm.set_estop(False)
         log.info("E-stop released by %s", who)
         return True
 
@@ -347,6 +428,14 @@ class MotorController:
             return 0.0, 0.0
         # Blocked wheels hold for every driver, even with the obstacle stop off: they're stuck on something.
         lin, ang = self.stall.limit(d.target_linear, d.target_angular)
+        if self.arm is not None:
+            arm = self.arm.drive_limit()
+            if arm == "out":                              # the arm isn't stowed: no driving at all
+                self._note_hold(None, now)
+                return 0.0, 0.0
+            if arm == "unknown":                          # starting up, lost, unplugged: slowly
+                lin = _clamp(lin, self.cfg.obstacle_blind_speed)
+                ang = _clamp(ang, self.cfg.arm_unknown_angular)
         if lin > 0 and self.obstacle_stop_active():
             a = self.ahead()
             lin = min(lin, a["max_forward"])            # forward only: backing away and turning stay free
@@ -393,15 +482,31 @@ class MotorController:
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name="motor-loop")
+        if self.arm is not None:
+            self.arm.arm.start()
         for sensor in (self.range, self.lidar, self.matrix):
             if sensor is not None:
                 sensor.start()
+
+    def _arm_follow_sleep(self) -> None:
+        """The arm follows the robot's sleep, however it came (a page, the night's schedule, a restart): parked
+        (stowed, torque off) while asleep; torque on, where it is, once awake."""
+        arm = self.arm
+        if arm is None or (self._arm_parking is not None and not self._arm_parking.done()):
+            return
+        if self.sleep.asleep and not arm.asleep and arm.arm.state == "ready":
+            self._arm_parking = asyncio.create_task(arm.park(), name="arm-park")
+        elif not self.sleep.asleep and arm.asleep:
+            arm.wake()
 
     async def stop(self) -> None:
         self._stopping = True
         if self._task:                     # first, so the loop can't slip a moving command between the zeros
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
+        if self.arm is not None:
+            self.arm.hold("the server is stopping")
+            await self.arm.arm.stop()
         for sensor in (self.range, self.lidar, self.matrix):
             if sensor is not None:
                 await sensor.stop()
@@ -437,6 +542,7 @@ class MotorController:
 
     async def _run(self) -> None:
         while not self._stopping:
+            self._arm_follow_sleep()                   # here: it must work with the board unplugged too
             if not self._port.is_open:
                 if not await self._open():
                     await asyncio.sleep(self.cfg.reopen_interval_s)
@@ -565,6 +671,7 @@ class MotorController:
             "range": self.range.snapshot() if self.range is not None else None,
             "lidar": self.lidar.snapshot() if self.lidar is not None else None,
             "matrix": self.matrix.snapshot() if self.matrix is not None else None,
+            "arm": self.arm.snapshot() if self.arm is not None else None,
         }
 
 
@@ -597,7 +704,8 @@ def visitor_login(request: web.Request) -> str | None:
     return request.headers.get("Tailscale-User-Login", "").strip()[:120] or None
 
 
-CAMERA_ROLES = {"25a1:0006": "head", "25a1:0007": "nav"}
+# The Beam+'s own two, and a Razer Kiyo Pro looking at the arm (its microphone is switched off by a udev rule).
+CAMERA_ROLES = {"25a1:0006": "head", "25a1:0007": "nav", "1532:0e05": "arm"}
 
 
 def _cameras(sysfs: str) -> list[tuple[str, str]]:
@@ -861,6 +969,13 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                                                 else "a person is driving"})
                     elif m.get("type") == "stop":
                         ctrl.release(me)
+                    elif m.get("type") in ("arm_gesture", "arm_stop"):
+                        # Named gestures only (beamctl/arm.py GESTURES): the AI can't send the arm anywhere else.
+                        ok, why = ctrl.arm_command(m, me, PRIORITY_BRAIN)
+                        log.info("arm order %s from the brain: %s", m.get("type"), why)
+                        await ws.send_json({"type": "arm_result", "ok": ok, "reason": why})
+                    elif str(m.get("type", "")).startswith("arm_"):
+                        await ws.send_json({"type": "denied", "reason": "the AI can only play arm gestures"})
                     else:
                         await hub.from_brain(m)
                 except (ValueError, TypeError, AttributeError):
@@ -940,6 +1055,13 @@ def build_app(ctrl: MotorController, *, allow_remote_robot: bool = False,
                                                         "text": f"8x8 sensor: {why}"})
                             learning.add(asyncio.create_task(learn()))
                             learning.difference_update({t for t in learning if t.done()})
+                    elif kind in ("arm_jog", "arm_joint", "arm_stow", "arm_stop", "arm_let_go", "arm_hold", "arm_light",
+                                  "arm_gesture", "arm_record", "arm_save", "arm_forget"):
+                        ok, why = ctrl.arm_command(m, me)
+                        if kind != "arm_jog" or not ok:          # a held button sends 5 a second: not each one
+                            log.info("arm order %s from driving page %s: %s", kind, pid, why)
+                            await ws.send_json({"type": "notice" if ok else "denied", "reason": why,
+                                                "text": f"Arm: {why}"})
                     elif kind == "estop":
                         ctrl.set_estop(True, me, f"driving page {pid}")
                     elif kind == "release_estop":
@@ -1078,6 +1200,10 @@ def main() -> None:
                     help="how far behind the front edge it sits, metres (default %(default)s)")
     ap.add_argument("--matrix-flip", default="", choices=["", "x", "y", "xy"],
                     help="x: its left and right come out swapped; y: it's upside down")
+    ap.add_argument("--arm-device", default=None,
+                    help="the robot arm's serial port, by name (/dev/serial/by-id/...); default: no arm")
+    ap.add_argument("--arm-speed", type=float, default=Config.arm_speed_deg,
+                    help="arm moves, degrees a second (default %(default)s, at most 45)")
     ap.add_argument("--no-obstacle-stop", action="store_true",
                     help="don't slow down and stop for obstacles ahead (lidar / ultrasonic sensor)")
     ap.add_argument("--obstacle-stop-m", type=float, default=Config.obstacle_stop_m,
@@ -1114,7 +1240,9 @@ def main() -> None:
                  obstacle_stop=not args.no_obstacle_stop, obstacle_stop_m=args.obstacle_stop_m,
                  obstacle_slow_m=max(args.obstacle_slow_m, args.obstacle_stop_m + 0.05),
                  robot_half_width_m=args.robot_half_width, lidar_to_front_m=args.lidar_to_front,
-                 lidar_side_m=args.lidar_side)
+                 lidar_side_m=args.lidar_side,
+                 arm_device=None if args.arm_device in (None, "", "none") else args.arm_device,
+                 arm_speed_deg=args.arm_speed)
     if cfg.token is None:
         log.warning("no --token set: anyone on this network can drive the robot")
     ssl_ctx = None

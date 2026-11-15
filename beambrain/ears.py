@@ -53,6 +53,11 @@ TURN_THRESHOLD = 0.5       # how sure Smart Turn must be that you've finished
 TURN_MAX_SILENCE_S = 2.5   # finished anyway after this much quiet
 MIN_TURN_S = 0.4           # shorter: a click or a cough
 SHORT_TURN_S = 2.0         # a turn this short that Whisper's own filter empties is heard again without it
+# ...keeping only what Whisper scores as speech: short answers ("OK", "yes", "no", quiet too) scored at most 0.23
+# for "no speech", noises (hiss, clatter, a motor, mumbling) 0.63 and up, and came out as the prompt.
+RETRY_MAX_NO_SPEECH = 0.5
+# The prompt's own description, which nobody says to him: Whisper writes it for noise.
+_PROMPT_ECHO_RE = re.compile(r"\brocky is a robot\b\W*", re.IGNORECASE)
 MAX_TURN_S = 15.0
 
 
@@ -209,13 +214,16 @@ class Transcriber:
         if not text and len(audio) <= SHORT_TURN_S * SAMPLE_RATE:
             # Whisper's own speech filter is stricter than ours and threw away whole short answers ("OK", 0.6 s):
             # a quarter of all turns over three days. Our VAD already said it was speech: hear it without the filter.
-            text = self._text(audio, vad_filter=False)
+            # But without it, a noise (a hiss, a clatter, the robot moving) comes out as the prompt itself ("Rocky is
+            # a robot.", a place's "Go to the kitchen."): so here only what Whisper itself thinks is speech counts.
+            text = self._text(audio, vad_filter=False, max_no_speech=RETRY_MAX_NO_SPEECH)
         return text
 
-    def _text(self, audio: np.ndarray, vad_filter: bool) -> str:
+    def _text(self, audio: np.ndarray, vad_filter: bool, max_no_speech: float = 1.0) -> str:
         segments, _ = self.model.transcribe(audio, language="en", beam_size=1, vad_filter=vad_filter,
                                             initial_prompt=self.prompt)
-        return " ".join(s.text.strip() for s in segments).strip()
+        text = " ".join(s.text.strip() for s in segments if s.no_speech_prob <= max_no_speech).strip()
+        return _PROMPT_ECHO_RE.sub("", text).strip()
 
 
 # --- the wake word -----------------------------------------------------------------------

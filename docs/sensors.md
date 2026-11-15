@@ -101,7 +101,7 @@ which the server leaves out. Settings, if yours differs:
 | Option | Default | |
 |---|---|---|
 | `--lidar-device` | `auto` | a serial port path, or `none` to turn it off (`LIDAR_DEVICE` in beam.conf) |
-| `--lidar-mask` | `135-210` | degrees to leave out; `''` for none (one it can't read is logged and ignored) |
+| `--lidar-mask` | `135-210` | degrees to leave out; `''` for none (one it can't read is logged and ignored); `LIDAR_MASK` in beam.conf |
 | `--lidar-rotation` | `0` | degrees to add if the arrow doesn't point to the front |
 
 To find the mask for another mounting: point it as above, look at which directions show hits only a few
@@ -149,12 +149,13 @@ high, two in a row up to 5, while the middle of three stayed under 2.5 cm. The n
 
 Get the height and tilt right: too little tilt set, and the floor ahead looks like an obstacle (the robot stops
 for nothing); too much, and real obstacles near the floor are taken for floor. The tilt is easiest to get from
-the floor itself: with nothing in front, the bottom two rows read the floor, at about height ÷ sin(row's angle
-down), where row 7 looks 26.25° below the sensor's axis and row 6 18.75°, plus the tilt. Ours, 25 cm up, read
-0.43 m and 0.57 m. But those come out short: each cell covers a 7.5° cone, and on a slanted floor it reports the
-near edge of it, so the floor alone suggests too much tilt (ours: 8°, which hid a shoe completely). Measure the
-height, then check with a shoe at 1 m: we ended at 24.5 cm and 3.5° (at 2° the floor counted, at 5° the shoe at
-1 m was lost).
+the floor itself. A reading is the depth along the sensor's own axis, not the distance along the cell's line, so
+with nothing in front a middle cell of the bottom rows reads the floor at about
+height × cos(row's angle) ÷ sin(row's angle + tilt), where row 7 looks 26.25° below the axis, row 6 18.75° and
+row 5 11.25°; the outer columns read a little shorter. Ours, 24.5 cm up, read 0.43 m and 0.60 m: 4° (we had set
+3.5° with a shoe at 1 m: at 2° the floor counted, at 5° the shoe at 1 m was lost). After the base was taken apart
+and put back it read 0.40, 0.52 and 0.77 m: 7.5°. (Taken as distances along the line, those same readings
+suggest a tilt a few degrees too steep, which once hid a shoe completely.)
 
 **Learn the floor.** Even set right, geometry misjudges the bottom rows: a corner cell that reads a little short
 looks like a shoe, and a shoe's low toe like floor. So with the robot still and the floor clear for 1 m in front, press

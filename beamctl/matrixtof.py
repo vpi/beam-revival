@@ -7,6 +7,11 @@ Over USB it's a plain serial port (an RP2040, USB id 2e8a:000a, product "Pico") 
 The cells cover about 60 degrees each way. Each one is a direction, so with the sensor's height and tilt each
 reading is a point in front of the robot: points on the floor are the floor, points in the robot's path above it
 are obstacles. The obstacle stop takes the nearest of those, like one distance sensor straight ahead.
+
+A reading is the depth along the sensor's own axis, not the distance along the cell's line: the floor on the robot
+fits that within 2-3% in every cell, outer columns reading shorter than the middle, as depth predicts (as distance
+along the line, 6% off, the outer columns would read longer). So a cell's point is its direction times
+reading / (its direction's share along the axis).
 """
 
 from __future__ import annotations
@@ -38,10 +43,10 @@ MEDIAN_OF = 3                  # each cell is judged on the middle of its last 3
                                # Floor seen at a slant is noisy: over a black kitchen mat single frames read up to
                                # 7 cm high, two in a row up to 5; the middle of three stayed under 2.5 (181 frames)
 
-# The floor, learnt. Each cell covers a 7.5 degree cone, and on a slanted floor it reports the near edge of it, so the
-# floor reads shorter than the cell's centre line says (on ours, 20% at the bottom row), and corner cells shorter
-# still. So with the way ahead clear, the robot can learn what each cell reads as floor; from then on a cell that saw
-# floor tells height by how much shorter than that it reads, instead of by geometry (which a corner cell fools).
+# The floor, learnt. Even read as depth, each cell (a 7.5 degree cone) can read the floor a few per cent off what its
+# centre line says, and a measured tilt or height is only so exact. So with the way ahead clear, the robot can learn
+# what each cell reads as floor; from then on a cell that saw floor tells height by how much shorter than that it
+# reads, instead of by geometry.
 FLOOR_LEARN_S = 3.0            # how long it watches the floor
 FLOOR_SEEN = 0.7               # a cell has to read in this share of frames to have a floor
 FLOOR_LEARN_Z_M = 0.06         # a reading this low (by geometry) is floor...
@@ -207,10 +212,12 @@ class MatrixSensor(RangeSensor):
         log.info("8x8 sensor: floor forgotten; going by its height and tilt alone")
 
     def _direction(self, az: float, el: float) -> tuple[float, float, float]:
-        """A cell's direction on the robot: (ahead, to the right, up) for 1 m along it."""
+        """A cell's point on the robot for a reading of 1 m: (ahead, to the right, up). The reading is depth along
+        the sensor's axis, so the point lies 1 / (the direction's share along the axis) metres along the cell's line."""
         f, right, up = math.cos(el) * math.cos(az), math.cos(el) * math.sin(az), math.sin(el)
         t = self.tilt
-        return f * math.cos(t) + up * math.sin(t), right, -f * math.sin(t) + up * math.cos(t)
+        along = 1 / f                                  # f: the direction's share along the sensor's axis
+        return (f * math.cos(t) + up * math.sin(t)) * along, right * along, (-f * math.sin(t) + up * math.cos(t)) * along
 
     def _on_data(self, data: bytes) -> None:
         frames = self._frames.feed(data)
@@ -260,7 +267,7 @@ class MatrixSensor(RangeSensor):
                 x, y = d * ahead, d * right
                 own = floor[r][c] if floor is not None else None
                 if own is not None:
-                    h = (own - mm) / 1000 * -up                       # how far above its floor, along its line
+                    h = (own - mm) / 1000 * -up                       # how far above its floor (up: per metre of reading)
                     tall = h > MIN_HEIGHT_M
                 else:
                     h = self.height_m + d * up

@@ -78,3 +78,53 @@ def test_panel_opens_one_camera_at_a_time_and_closes_replaced_peers():
     assert "opening = opening ||" in js
     assert "if (old) old.close();" in js
     assert "hellos.get(from) !== n" in js
+
+
+def test_the_arm_card_moves_only_while_a_button_is_held():
+    """Hold to move: arm_jog goes out while a button is held; letting go (or the page losing focus, a dialog,
+    the card going off) sends arm_stop at once. The server also freezes it half a second after the last jog."""
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    js = script("index.html")
+    assert 'id="armCard"' in page and page.count('class="linkbtn jog"') == 8
+    assert 'send({ type: "arm_jog", joint: btn.dataset.joint, dir: Number(btn.dataset.dir) })' in js
+    assert 'for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) btn.addEventListener(ev, jogStop)' in js
+    stop = js[js.index("function jogStop()"):js.index("for (const btn of")]
+    assert 'send({ type: "arm_stop" })' in stop and "clearInterval(jogTimer)" in stop
+    release = js[js.index("function releaseAll()"):js.index("function jogStart")]
+    assert "jogStop();" in release
+    assert "if (off) jogStop();" in js
+    # Letting it go limp asks first, like every dialog on the page.
+    assert 'if (ask("Let go of the arm?' in js
+
+
+def test_the_robot_screen_and_phone_say_who_moves_the_arm():
+    robot, panel = script("robot.html"), script("panel.html")
+    assert '"🤖 AI is moving the arm"' in robot and '"🦾 A driver is moving the arm"' in robot
+    assert 'ab.classList.toggle("ai", by === "brain")' in robot
+    assert '"🤖 The AI is moving the arm"' in panel and '"🦾 A driver is moving the arm"' in panel
+
+
+def test_the_arm_camera_goes_to_the_arm_card_video_only():
+    robot, page = script("robot.html"), script("index.html")
+    assert "byRole(\"arm\")" in robot and "/kiyo/i.test(c.label)" in robot
+    arm_open = robot[robot.index("const armCam"):robot.index("return { head, nav, arm")]
+    assert "audio" not in arm_open                         # its microphone is never opened
+    assert "arm: media.arm ? media.arm.id : null" in robot
+    assert "media && media.arm]) if (s) s.getTracks().forEach((t) => t.stop())" in robot   # closed for sleep
+    assert 'stream.id === streamIds.arm' in page and '$("armVideo").srcObject = stream' in page
+
+
+def test_the_arm_light_button_and_brightness():
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    js = script("index.html")
+    assert 'id="armLight"' in page and 'id="armLightLevel"' in page
+    assert 'send({ type: "arm_light", level: armLightOn ? 0 : armLightLevel() })' in js
+
+
+def test_gestures_come_from_the_robot_and_teaching_has_its_buttons():
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    js = script("index.html")
+    assert 'id="armGestures"' in page and 'id="armRecord"' in page and 'id="armSave"' in page
+    assert 'send({ type: "arm_gesture", name: g })' in js and 'send({ type: "arm_record", on: armRecording == null })' in js
+    assert 'if (ask(`Forget the gesture "${g}"?`)) send({ type: "arm_forget", name: g })' in js
+    assert 'const name = askText(' in js                     # a dialog: lets go of the controls first

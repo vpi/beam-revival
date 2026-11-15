@@ -194,6 +194,21 @@ def serial_device(conf: dict[str, str], key: str) -> tuple[str, str | None]:
                     "optionally @degrees" if key == "RANGE_DEVICE" else "") + ", auto or none): finding it automatically")
 
 
+def arm_settings(conf: dict[str, str]) -> tuple[str, list[str]]:
+    """The robot arm: ARM_DEVICE, its port by name (never looked for: its USB chip is the lidar's), empty or
+    none for no arm. Server arguments, and messages."""
+    raw = conf.get("ARM_DEVICE", "").strip()
+    if raw.lower() in ("", "none"):
+        return "", []
+    device, problem = serial_device(conf, "ARM_DEVICE")
+    if problem or device in ("auto", "none"):
+        return "", ["ARM_DEVICE must be the arm's name from /dev/serial/by-id: no arm until it is"]
+    problems = []
+    if serial_device(conf, "LIDAR_DEVICE")[0] == "auto":
+        problems.append("With an arm, set LIDAR_DEVICE too: both use the same kind of USB chip")
+    return f" --arm-device {device}", problems
+
+
 def matrix_mount(conf: dict[str, str]) -> tuple[str, list[str]]:
     """Where the 8x8 distance sensor is: MATRIX_HEIGHT_CM (lens above the floor), MATRIX_TILT_DEG (how far it
     points down), MATRIX_FLIP (x, y or xy). Server arguments, and messages for anything not understood (left out:
@@ -235,6 +250,18 @@ def obstacle_settings(conf: dict[str, str]) -> tuple[str, list[str]]:
         else:
             problems.append(f"{key} not understood (a number from {low} to {high}): using the default")
     return args, problems
+
+
+def lidar_mask(conf: dict[str, str]) -> tuple[str, list[str]]:
+    """LIDAR_MASK: the directions the lidar leaves out (what the mast hides), degrees clockwise from straight
+    ahead, e.g. 135-214. Server arguments, and a message if not understood (left out: the server's default)."""
+    raw = conf.get("LIDAR_MASK", "").replace(" ", "")
+    if not raw:
+        return "", []
+    m = re.fullmatch(r"(\d{1,3})-(\d{1,3})", raw)
+    if m and all(int(v) <= 360 for v in m.groups()) and m[1] != m[2]:
+        return f" --lidar-mask {int(m[1])}-{int(m[2])}", []
+    return "", ["LIDAR_MASK not understood (two angles from 0 to 360, e.g. 135-214): using the default"]
 
 
 def write_private(path: Path, text: str) -> None:
@@ -336,7 +363,7 @@ def cmd_config() -> None:
             messages.append(problem)
         if device != "auto":
             args += f" {flag} {device}"
-    for more, problems in (matrix_mount(conf), obstacle_settings(conf)):
+    for more, problems in (matrix_mount(conf), obstacle_settings(conf), lidar_mask(conf), arm_settings(conf)):
         args += more
         messages += problems
     sleep_hours = conf.get("SLEEP_HOURS", "").replace(" ", "")

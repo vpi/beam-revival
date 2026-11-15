@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Callable
 
@@ -94,8 +95,11 @@ class ScanParser:
 
 class Lidar:
     def __init__(self, device: str = "auto", mask: str | None = None, rotation: float = 0.0,
-                 should_spin: Callable[[], bool] = lambda: True):
+                 should_spin: Callable[[], bool] = lambda: True, claimed: set[str] | None = None):
+        """claimed: ports others in this server use (the robot arm's: its USB chip is a CP2102N too). Looking
+        for the lidar never opens them: its probe bytes would reach the arm."""
         self.device = device                   # a serial port path, or "auto" (a CP2102N that answers as a lidar)
+        self.claimed = claimed if claimed is not None else set()
         self.picker = PortPicker(device or "auto", AUTO)
         try:
             self.mask = parse_mask(mask)
@@ -131,7 +135,8 @@ class Lidar:
             self.port.close()
 
     def _candidates(self) -> list[str]:
-        return self.picker.candidates()
+        taken = {os.path.realpath(c) for c in self.claimed}
+        return [c for c in self.picker.candidates() if os.path.realpath(c) not in taken]
 
     async def _identify(self, path: str) -> SerialPort | None:
         """The port open, if a lidar answers on it; else None, and the port is left alone for a while."""

@@ -181,6 +181,13 @@ the `--home-drivers`); for anyone else he says the driver does the moving.
 - He's labelled as the AI on every screen while he drives, and says when he's there (or that he couldn't get there).
   Listening is off while a driving page is open, so to talk to him, close the driving page.
 
+## His arm
+
+With a robot arm fitted (docs/arm.md), he can play its gestures when someone asks: "hey Rocky, wave". Only the
+named gestures the robot knows (from the stow and back), for the same people who may send him places, never on his
+own, and never while a person is at the controls. Any person's input stops him at once; the robot screen shows his
+moves in purple.
+
 ## Who is where (room presence)
 
 A place can name the Home Assistant **presence sensors** in its room (an mmWave radar's occupancy sensor such as

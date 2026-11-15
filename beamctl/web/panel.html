@@ -279,6 +279,9 @@
     if (M.brain_online && M.robot_online && !sleeping) seen.push("🤖 The AI sees the camera (face recognition)");
     if (M.listening) seen.push("👂 Rocky (AI) is listening");
     if (feed) seen.push("🤖 The AI is using the rear camera to back onto the charger");
+    const armBy = s.arm && s.arm.state === "moving" ? s.arm.by : null;
+    if (armBy) seen.push(armBy === "brain" ? "🤖 The AI is moving the arm" : armBy === "sleep"
+      ? "🦾 The arm is stowing for sleep" : "🦾 A driver is moving the arm");
     const p = $("privacy");
     p.className = "privacy" + (seen.length ? " watching" : "");
     p.textContent = seen.length ? seen.join(" · ") : "📷 Nobody is watching";

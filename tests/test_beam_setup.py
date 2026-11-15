@@ -294,3 +294,29 @@ def test_the_robot_width_and_obstacle_distances_reach_the_server(bs, tmp_path, m
                 {"OBSTACLE_SLOW_CM": "1e3"}, {"LIDAR_SIDE_CM": "20"}, {"LIDAR_SIDE_CM": "left"}):
         args, problems = bs.obstacle_settings(bad)
         assert args == "" and len(problems) == 1, bad
+
+
+def test_the_arm_runs_only_on_a_named_port(bs, tmp_path, monkeypatch):
+    name = "usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_X-if00-port0"
+    config_rig(bs, tmp_path, monkeypatch, f"WIFI_SSID=home\nLIDAR_DEVICE=usb-lidar\r\nARM_DEVICE={name}\r\n")
+    bs.cmd_config()
+    args = next(l for l in bs.SERVER_ENV.read_text().splitlines() if l.startswith("BEAM_ARGS="))
+    assert args.endswith(f" --arm-device /dev/serial/by-id/{name}")
+    assert bs.arm_settings({}) == ("", []) and bs.arm_settings({"ARM_DEVICE": "none"}) == ("", [])
+    for bad in ("auto", "../../etc/x", "a b"):
+        args, problems = bs.arm_settings({"ARM_DEVICE": bad, "LIDAR_DEVICE": "usb-lidar"})
+        assert args == "" and len(problems) == 1, bad
+    args, problems = bs.arm_settings({"ARM_DEVICE": name})            # the lidar left to auto: a warning
+    assert args and len(problems) == 1 and "LIDAR_DEVICE" in problems[0]
+
+
+def test_the_lidar_mask_reaches_the_server(bs, tmp_path, monkeypatch):
+    config_rig(bs, tmp_path, monkeypatch, "WIFI_SSID=home\nLIDAR_MASK=135-214\r\n")
+    bs.cmd_config()
+    args = next(l for l in bs.SERVER_ENV.read_text().splitlines() if l.startswith("BEAM_ARGS="))
+    assert args.endswith(" --lidar-mask 135-214")
+    assert bs.lidar_mask({}) == ("", [])
+    assert bs.lidar_mask({"LIDAR_MASK": "350 - 20"}) == (" --lidar-mask 350-20", [])
+    for bad in ("135-214; reboot", "135", "135-400", "-10-20", "90-90", "left"):
+        args, problems = bs.lidar_mask({"LIDAR_MASK": bad})
+        assert args == "" and len(problems) == 1, bad

@@ -85,6 +85,16 @@
   .linkbtn { border: 1px solid var(--line); background: transparent; color: var(--text); border-radius: 6px;
              padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
   .hiddenCard { display: none; }
+  .armjoint { display: grid; grid-template-columns: 1fr auto 4.5em auto; align-items: center; gap: 6px; padding: 2px 0; }
+  .armjoint .num { text-align: center; }
+  .armjoint .jog { min-width: 3.2em; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .armjoint .jog.held { background: var(--line); }
+  .armbtns { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+  .armlight { align-items: center; }
+  .armlight input { flex: 1; }
+  #armLight.on { background: #f5c542; color: #000; }
+  .armvideo { width: 100%; border-radius: 6px; background: #000; aspect-ratio: 16 / 9; cursor: zoom-in; margin-bottom: 6px; }
+  .armvideo.big { position: fixed; inset: 5vh 5vw; width: 90vw; height: 90vh; z-index: 50; cursor: zoom-out; }
   #lidarView { width: 100%; max-width: 280px; aspect-ratio: 1; display: block; margin: 6px auto 0; }
   /* The AI is in charge: its own colour everywhere, never mistaken for a person. */
   :root { --ai: #7c4dff; }
@@ -205,6 +215,7 @@
       <input id="speed" type="range" min="10" max="100" step="5" value="50">
       <div class="row hiddenCard" id="obstacleRow"><span>Obstacle stop</span>
         <label><input type="checkbox" id="obstacleStop" checked> <span id="obstacleText">on</span></label></div>
+      <div class="row hiddenCard" id="armDriveRow"><span>Arm</span><span id="armDriveText">out: stow it to drive</span></div>
       <p class="help"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows to drive, <kbd>Space</kbd> to stop. A gamepad works too. Releasing every control stops the robot.</p>
     </div>
 
@@ -230,6 +241,34 @@
       <button class="linkbtn hiddenCard" id="matrixFloorBtn" title="With the robot still and 1 m in front of it clear, the 8x8 sensor learns what the floor looks like, so low things on it (a shoe's toe) count and the floor never does">Learn the floor (8x8 sensor)</button>
       <div class="row"><span>Mode</span><span id="sleepState">—</span></div>
       <button class="linkbtn" id="sleepBtn" title="Cameras, microphone, screen off until woken from this page">🌙 Put to sleep</button>
+    </div>
+
+    <div class="card hiddenCard" id="armCard">
+      <h2>🦾 Arm (experimental)</h2>
+      <video id="armVideo" class="armvideo hiddenCard" autoplay muted playsinline title="The arm camera. Click to enlarge."></video>
+      <div class="row"><span>State</span><span id="armState">—</span></div>
+      <div class="help" id="armWhy"></div>
+      <div class="armjoint"><span>Base</span><button class="linkbtn jog" data-joint="base" data-dir="-1">−</button><span class="num" id="armJ-base">—</span><button class="linkbtn jog" data-joint="base" data-dir="1">+</button></div>
+      <div class="armjoint"><span>Shoulder</span><button class="linkbtn jog" data-joint="shoulder" data-dir="-1">−</button><span class="num" id="armJ-shoulder">—</span><button class="linkbtn jog" data-joint="shoulder" data-dir="1">+</button></div>
+      <div class="armjoint"><span>Elbow</span><button class="linkbtn jog" data-joint="elbow" data-dir="-1">−</button><span class="num" id="armJ-elbow">—</span><button class="linkbtn jog" data-joint="elbow" data-dir="1">+</button></div>
+      <div class="armjoint"><span>Gripper</span><button class="linkbtn jog" data-joint="gripper" data-dir="-1">open</button><span class="num" id="armJ-gripper">—</span><button class="linkbtn jog" data-joint="gripper" data-dir="1">close</button></div>
+      <div class="armbtns">
+        <button class="aibtn" id="armStow" title="Gripper closed, then the shoulder down, the elbow folded, the base: along the stand">Stow</button>
+        <button class="linkbtn" id="armStop">Stop arm</button>
+        <button class="linkbtn" id="armLetGo" title="Servos off: the arm goes limp and may drop">Let go</button>
+        <button class="linkbtn" id="armHold" title="Servos on again, where the arm is">Hold again</button>
+      </div>
+      <div class="armbtns" id="armGestures"><span class="help">Gestures (from the stow, back to it):</span></div>
+      <div class="armbtns">
+        <button class="linkbtn" id="armRecord" title="From the stow: the moves you make with − and + are recorded, in order">● Record a gesture</button>
+        <button class="linkbtn hiddenCard" id="armSave">💾 Save as…</button>
+        <span class="help" id="armRecText"></span>
+      </div>
+      <div class="row armlight"><button class="linkbtn" id="armLight" title="The light on the gripper">💡 Light</button>
+        <input id="armLightLevel" type="range" min="5" max="100" step="5" value="100" title="Brightness">
+        <span class="num" id="armLightText">off</span></div>
+      <p class="help">Hold − or + to move a joint, let go and it stops. The robot drives only with the arm stowed, and
+        the arm won't leave its stow while the robot moves. <kbd>Space</kbd> (STOP) freezes the arm too.</p>
     </div>
 
     <div class="card hiddenCard" id="aiCard">
@@ -398,6 +437,11 @@
       return;
     }
     if (stream && stream.id === streamIds.rear) { vidRear.srcObject = stream; return; }
+    if (stream && streamIds.arm && stream.id === streamIds.arm) {          // the arm camera: in the Arm card
+      $("armVideo").srcObject = stream;
+      $("armVideo").classList.remove("hiddenCard");
+      return;
+    }
     const isNav = stream && stream.id === streamIds.nav;
     const el = (isNav !== swapped) ? vidB : vidA;
     el.srcObject = stream || new MediaStream([e.track]);
@@ -841,6 +885,100 @@
   function releaseAll() {
     keys.clear(); updateKb(); joyId = null; input.joy = [0, 0]; centerKnob();
     if (!sentZero && !estop) { send({ type: "stop" }); sentZero = true; }
+    jogStop();
+  }
+
+  // ---------- the arm: hold a button to move a joint ----------
+  // While held, an "arm_jog" goes out 5 times a second; the server freezes the arm half a second after the last.
+  // Letting go also sends "arm_stop" at once.
+  let jogTimer = null, jogBtn = null;
+  function jogStart(btn) {
+    jogStop();
+    jogBtn = btn; btn.classList.add("held");
+    const tick = () => send({ type: "arm_jog", joint: btn.dataset.joint, dir: Number(btn.dataset.dir) });
+    tick(); jogTimer = setInterval(tick, 200);
+  }
+  function jogStop() {
+    if (!jogTimer) return;
+    clearInterval(jogTimer); jogTimer = null;
+    if (jogBtn) jogBtn.classList.remove("held");
+    jogBtn = null;
+    send({ type: "arm_stop" });
+  }
+  for (const btn of document.querySelectorAll(".armjoint .jog")) {
+    btn.addEventListener("pointerdown", (e) => { e.preventDefault(); btn.setPointerCapture(e.pointerId); jogStart(btn); });
+    for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) btn.addEventListener(ev, jogStop);
+    btn.addEventListener("contextmenu", (e) => e.preventDefault());       // a long press on a phone
+  }
+  $("armVideo").addEventListener("click", () => $("armVideo").classList.toggle("big"));
+  $("armStow").addEventListener("click", () => send({ type: "arm_stow" }));
+  $("armStop").addEventListener("click", () => { jogStop(); send({ type: "arm_stop" }); });
+  $("armLetGo").addEventListener("click", () => {
+    if (ask("Let go of the arm? Its servos switch off: it goes limp and may drop. \"Hold again\" switches them back on."))
+      send({ type: "arm_let_go" });
+  });
+  $("armHold").addEventListener("click", () => send({ type: "arm_hold" }));
+  // Gesture buttons, from the robot's list: built-in ones, and ones taught here (with ✕ to forget them).
+  const GESTURE_LABEL = { wave: "👋 Wave", fist_bump: "🤜 Fist bump" };
+  let gestureKey = "";
+  function renderGestures(A) {
+    const key = JSON.stringify([A.gestures || [], A.taught || []]);
+    if (key === gestureKey) return;
+    gestureKey = key;
+    const box = $("armGestures");
+    box.querySelectorAll("button").forEach((b) => b.remove());
+    for (const g of A.gestures || []) {
+      const b = document.createElement("button");
+      b.className = "linkbtn"; b.textContent = GESTURE_LABEL[g] || `✋ ${g}`;
+      b.addEventListener("click", () => send({ type: "arm_gesture", name: g }));
+      box.appendChild(b);
+      if ((A.taught || []).includes(g)) {
+        const x = document.createElement("button");
+        x.className = "linkbtn"; x.textContent = "✕"; x.title = `Forget "${g}"`;
+        x.addEventListener("click", () => { if (ask(`Forget the gesture "${g}"?`)) send({ type: "arm_forget", name: g }); });
+        box.appendChild(x);
+      }
+    }
+  }
+  let armRecording = null;
+  $("armRecord").addEventListener("click", () => send({ type: "arm_record", on: armRecording == null }));
+  $("armSave").addEventListener("click", () => {
+    const name = askText("A name for this gesture (letters, digits, spaces), e.g. high five. Rocky can do it too when asked.");
+    if (name) send({ type: "arm_save", name });
+  });
+  // The gripper's light: the button switches it on (at the slider's brightness) or off; moving the slider while
+  // it's on changes it. It goes off by itself when the robot sleeps or this page closes.
+  let armLightOn = false;
+  const armLightLevel = () => Math.round(Number($("armLightLevel").value) * 2.55);
+  $("armLight").addEventListener("click", () => send({ type: "arm_light", level: armLightOn ? 0 : armLightLevel() }));
+  $("armLightLevel").addEventListener("change", () => { if (armLightOn) send({ type: "arm_light", level: armLightLevel() }); });
+  const ARM_STATE = {
+    stowed: "stowed · driving allowed", holding: "out · no driving until it's stowed",
+    limp: "limp (let go) · no driving", booting: "starting up · driving slowly",
+    lost: "not answering · driving slowly", off: "not connected · driving slowly",
+  };
+  function renderArm(A, asleep) {
+    $("armCard").classList.toggle("hiddenCard", !A);
+    $("armDriveRow").classList.toggle("hiddenCard", !A || !A.drive);
+    if (!A) return;
+    $("armDriveText").textContent = A.drive === "out" ? "out: stow it to drive" : "pose unknown: driving slowly";
+    $("armState").textContent = A.state === "moving"
+      ? (A.by === "brain" ? "🤖 AI is moving it" : A.by === "sleep" ? "stowing for sleep" : "moving (a driver)")
+      : ARM_STATE[A.state] || A.state;
+    $("armWhy").textContent = A.why ? `Last: ${A.why}` : "";
+    renderGestures(A);
+    armRecording = A.recording ?? null;
+    $("armRecord").textContent = armRecording == null ? "● Record a gesture" : "✕ Cancel recording";
+    $("armSave").classList.toggle("hiddenCard", armRecording == null);
+    $("armRecText").textContent = armRecording == null ? "" : `recording · ${armRecording} move${armRecording === 1 ? "" : "s"}`;
+    armLightOn = !!A.light;
+    $("armLight").classList.toggle("on", armLightOn);
+    $("armLightText").textContent = A.light ? `${Math.round(A.light / 2.55)}%` : "off";
+    for (const k of ["base", "shoulder", "elbow", "gripper"])
+      $("armJ-" + k).textContent = A.joints ? `${A.joints[k].toFixed(0)}°` : "—";
+    const off = asleep || !["stowed", "holding", "limp", "moving"].includes(A.state);
+    for (const b of document.querySelectorAll("#armCard button")) b.disabled = off && b.id !== "armStop";
+    if (off) jogStop();
   }
   addEventListener("blur", releaseAll);
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAll(); });
@@ -1065,6 +1203,7 @@
     $("matrixFloorBtn").classList.toggle("hiddenCard", !M || !M.fresh);
     if (M) $("matrixFloorBtn").textContent = M.floor ? "Learn the floor again (8x8 sensor)" : "Learn the floor (8x8 sensor)";
     drawLidar(m.lidar, R);
+    renderArm(m.arm, !!(m.sleep && m.sleep.asleep));
     if (!B) return;
     const pct = B.battery_percent;
     $("battBar").style.width = (pct ?? 0) + "%";
